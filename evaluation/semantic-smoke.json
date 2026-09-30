@@ -1,0 +1,9 @@
+[
+  {"id":"statement","context":"今天我们主要聊缓存。","currentText":"我们线上使用 Redis 做热点缓存。","expectedAction":"wait"},
+  {"id":"incomplete","context":"","currentText":"介绍一下 Redis 的缓存","expectedAction":"wait"},
+  {"id":"technical_question","context":"","currentText":"Redis 缓存穿透是什么？通常怎么处理？","expectedAction":"show"},
+  {"id":"instruction","context":"","currentText":"请比较限流器和熔断器的作用与适用场景。","expectedAction":"show"},
+  {"id":"followup","context":"面试官：Redis 缓存穿透是什么？","previousQuestion":"Redis 缓存穿透是什么？","visibleQuestion":"Redis 缓存穿透是什么？","currentText":"如果是大规模恶意请求，你会怎么设计防护？","expectedAction":"revise"},
+  {"id":"repeat","context":"面试官：Redis 缓存穿透是什么？","previousQuestion":"Redis 缓存穿透是什么？","visibleQuestion":"Redis 缓存穿透是什么？","currentText":"我再说一次，缓存穿透是什么？","expectedAction":"keep"},
+  {"id":"uncertain_term","context":"我们聊模型微调。","currentText":"什么是 Laura，它为什么用低秩矩阵？","expectedAction":"wait"}
+]

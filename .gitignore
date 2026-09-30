@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.build-tmp/
+outputs/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/examples/
+src-tauri/.tauri-private-key.pub
+*.log
+.env
+src-tauri/runtime/

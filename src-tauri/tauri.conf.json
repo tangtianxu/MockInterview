@@ -1,0 +1,74 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "MockInterview",
+  "version": "1.0.0",
+  "identifier": "app.interviewcue.local",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "launcher",
+        "title": "模拟面试练习",
+        "width": 1360,
+        "height": 850,
+        "minWidth": 760,
+        "minHeight": 480,
+        "resizable": true,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "visible": true
+      },
+      {
+        "label": "overlay",
+        "title": "模拟面试练习 · 悬浮提示",
+        "width": 410,
+        "height": 290,
+        "minWidth": 360,
+        "minHeight": 240,
+        "resizable": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "transparent": true,
+        "shadow": false,
+        "x": 50,
+        "y": 50
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "resources/sherpa-onnx/*.dll": "sherpa-onnx/",
+      "resources/sherpa-onnx/*.txt": "sherpa-onnx/"
+    },
+    "createUpdaterArtifacts": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "./nsis-hooks.nsh"
+      }
+    }
+  }
+}
