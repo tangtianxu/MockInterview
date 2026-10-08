@@ -865,6 +865,10 @@ function Main() {
     if (!visibleHintRef.current) {setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);}
     setStatus("generating");
     try {
+      if (settingsRef.current.answer.api === "ollama" && !runningRef.current) {
+        await invoke("start_local_service",{service:"ollama"});
+        if (answerRequestRef.current !== requestId) return;
+      }
       const background=topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
         settingsRef.current.answer.api==="ollama");
       await invoke("mvp_answer", {endpoint:endpoint(settingsRef.current.answer,"answer"),
@@ -878,7 +882,7 @@ function Main() {
 
   const submitEditedQuestion = useCallback(() => {
     const corrected=questionDraft.trim();
-    if (!corrected) {setError("请填写修正后的问题");return;}
+    if (!corrected) {setError("请填写问题");return;}
     setEditingQuestion(false);setError("");setDecisionMs(null);
     manualOverrideSourceRef.current=activeSourceRef.current;
     pendingHintRef.current="";pendingDisplayRef.current=null;
@@ -1115,6 +1119,10 @@ function Main() {
       } finally {setStartingService(false);}
     }
     try {
+      if (answerRequestRef.current) {
+        void invoke("mvp_cancel_answer",{requestId:answerRequestRef.current});
+        answerRequestRef.current="";answerDisplayRef.current=null;
+      }
       await invoke("set_stt_language",{language:"zh-CN"});
       const topic = settings.domain === "ai" ? "中文技术面试，人工智能与机器学习，英文技术缩写保持原文。" :
         settings.domain === "communication" ? "中文技术面试，通信和计算机网络，英文技术缩写保持原文。" :
@@ -1336,19 +1344,19 @@ function Main() {
       </section>
       <section className="answer-panel"><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
         <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div>
-          {!editingQuestion && <button className="question-edit-btn" disabled={!question} onClick={()=>{
+          {!editingQuestion && <button className="question-edit-btn" onClick={()=>{
             setQuestionDraft(question);setEditingQuestion(true);
           }}><Pencil size={13}/> 编辑问题</button>}</div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
-              value={questionDraft} maxLength={600} rows={3} onChange={event=>setQuestionDraft(event.target.value)}
+              value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
               onKeyDown={event=>{
                 if (event.key==="Escape") {event.preventDefault();setEditingQuestion(false);}
                 else if (event.key==="Enter" && (event.ctrlKey || event.metaKey)) {
                   event.preventDefault();submitEditedQuestion();
                 }
-              }}/><div className="question-editor-actions"><span>修正后将重新生成提示 · Ctrl+Enter 提交</span>
+              }}/><div className="question-editor-actions"><span>{running ? "修正后重新生成提示" : "直接测试回答，无需开始聆听"} · Ctrl+Enter 提交</span>
               <button onClick={()=>setEditingQuestion(false)}>取消</button>
-              <button className="primary" disabled={!questionDraft.trim()} onClick={submitEditedQuestion}>保存并重新回答</button></div></div>
+              <button className="primary" disabled={!questionDraft.trim()} onClick={submitEditedQuestion}>{question ? "保存并重新回答" : "生成回答"}</button></div></div>
             : <div className={question?"question-box active":"question-box"}><MathText text={question || "等待一个足够明确的面试问题…"}/></div>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
