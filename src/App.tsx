@@ -12,6 +12,7 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
 import { readablePreview } from "./answerDisplay";
+import { MathText } from "./MathText";
 import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
@@ -221,16 +222,16 @@ function Overlay() {
       <button className="icon-btn" aria-label="隐藏提示窗" onClick={() => void getCurrentWebviewWindow().hide()}><X size={16}/></button></div>
     <div className="floating-body">
       <div className="eyebrow">当前问题 {!practice && state.locked && <span className="lock-note"><LockKeyhole size={12}/> 正在说话，暂停更新</span>}</div>
-      <div className="floating-question">{practice ? (practice.question || "等待练习问题…") : (state.question || "等待面试官提出问题…")}</div>
+      <div className="floating-question"><MathText text={practice ? (practice.question || "等待练习问题…") : (state.question || "等待面试官提出问题…")}/></div>
       {!practice && state.keyTerms.length > 0 && <div className="term-list">{state.keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
       {!practice && state.uncertainTerms.length > 0 && <div className="term-warning">术语待确认：{state.uncertainTerms.join("、")}</div>}
-      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint || <span className="placeholder">回答后查看复盘</span>) : (state.hint || <span className="placeholder">答案要点会出现在这里</span>)}</div>
+      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <MathText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? <MathText text={state.hint}/> : <span className="placeholder">答案要点会出现在这里</span>)}</div>
       {!practice && state.hint && <button className="floating-expand" onClick={()=>{
         if (!expanded && (!state.detail || state.detail.startsWith("原理解释失败：")) && !state.detailLoading)
           void emit("mvp_detail_request");
         setExpanded(value=>!value);
       }} aria-expanded={expanded}>{expanded ? "收起细节" : "展开细节"}</button>}
-      {!practice && expanded && state.hint && <div className="floating-detail">{state.detailLoading ? "正在补充细节…" : state.detail || "等待补充细节…"}</div>}
+      {!practice && expanded && state.hint && <div className="floating-detail"><MathText text={state.detailLoading ? "正在补充细节…" : state.detail || "等待补充细节…"}/></div>}
     </div>
     <div className="floating-foot"><span className="live-dot"/> {practice?"模拟练习":"面试提示"} <span>·</span> 内容仅供参考</div>
     <ResizeCorners/>
@@ -1348,16 +1349,16 @@ function Main() {
               }}/><div className="question-editor-actions"><span>修正后将重新生成提示 · Ctrl+Enter 提交</span>
               <button onClick={()=>setEditingQuestion(false)}>取消</button>
               <button className="primary" disabled={!questionDraft.trim()} onClick={submitEditedQuestion}>保存并重新回答</button></div></div>
-            : <div className={question?"question-box active":"question-box"}>{question || "等待一个足够明确的面试问题…"}</div>}
+            : <div className={question?"question-box active":"question-box"}><MathText text={question || "等待一个足够明确的面试问题…"}/></div>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
           <div className="answer-label answer-label-space">定义与原理 <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
-          <div className="answer-card">{hint?<div className="answer-text">{hint}</div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
+          <div className="answer-card">{hint?<div className="answer-text"><MathText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
           {hint && <button className="detail-btn" onClick={()=>{
             if (!showDetail && (!detail || detail.startsWith("原理解释失败：")) && !detailLoading) void loadDetail();
             setShowDetail(!showDetail);
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
-          {showDetail && hint && <div className="detail-card"><b>进一步解释</b><p>{detailLoading?"正在补充细节…":detail || "等待补充细节…"}</p>
+          {showDetail && hint && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · API 首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           {error && <div className="error-box">{error}</div>}</div>
         <div className="answer-footer"><span><Check size={14}/> {settings.answer.api === "ollama" ? "本地回答" : "API 回答"}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>

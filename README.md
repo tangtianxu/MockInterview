@@ -1,8 +1,8 @@
 # 模拟面试练习 · MockInterview
 
-当前版本：1.0.3。
+当前版本：1.0.4。
 
-[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.3/MockInterview_1.0.3_x64-setup.exe) · [查看 1.0.3 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.3)
+[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.4/MockInterview_1.0.4_x64-setup.exe) · [查看 1.0.4 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.4)
 
 面向 Windows 11 的中文技术面试练习桌面应用。用户设置目标岗位、关注主题、练习范围、难度和时长后，模型逐题扮演面试官；用户可以输入回答，也可以用麦克风转写回答。每题提交后，应用显示参考评分、回答中的实际片段，以及值得进一步说明的方面。
 
@@ -139,6 +139,12 @@ API 密钥单独保存在 Windows 凭据管理器中，不写入可导出的配�
 
 参考生成完成后点击“下一题”。本轮全部已问题目会进入防重复检查，最近的作答摘要另行提供；新的候选题会经过精确重复与模型语义检查，重复时最多重新出题两次，仍重复则提示重试而不展示重复题。同一领域的不同考点允许继续练习，重复校验增加一次短模型请求，并不能保证模型始终正确区分所有相近问题。页面会保留本轮已回答的题目、提交文本、参考答案、各题参考评分和平均分，便于在当前运行期间回看。不要把当前轮的屏幕记录当作长期保存的正式成绩单。
 
+### 数学公式显示
+
+参考答案、技术纠错说明与练习题支持 LaTeX 公式显示，包括分数、根号、上下标、求和及矩阵。模型在涉及计算时会被要求给出公式并解释符号和必要维度；例如注意力计算中的 Q、K、V 与缩放因子。使用 `\( ... \)` 表示行内公式，`\[ ... \]` 或 `$$ ... $$` 表示独立公式。公式无需代码块，也无需额外开启开关。显示资源随软件打包，显示公式本身无需联网。
+
+流式生成中尚未闭合的公式暂时保留文本，完整后排版；格式错误或不支持的命令也保留原文。长公式可在公式区域横向滚动。排版不会验证数学推导是否正确，仍需核对模型提供的内容。
+
 ## 界面、数据保存与备份
 
 窗口支持缩放和调整大小；较窄时，题目与复盘内容排在设置区前面。顶部可控制练习设置区和回答复盘区的显示，窗口可设置置顶。设置中可选深色或浅色皮肤，并调整透明度。使用悬浮窗时，它显示当前练习问题和复盘摘要，适合在另一块屏幕或较小窗口中查看；完整操作仍在主窗口完成。
@@ -195,3 +201,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 ## 许可与致谢
 
 本项目使用了 [NexQ](https://github.com/naxhq/NexQ) 的 MIT 许可代码作为部分桌面、音频和模型接入基础；许可文本见 [LICENSE](LICENSE)。模拟面试练习的提问、简历分析与复盘流程由本项目实现。第三方模型、运行库与服务各自遵循其许可及服务条款。
+
+数学公式显示使用 [KaTeX](https://katex.org/)，其 MIT 许可见 [KaTeX-LICENSE.txt](src-tauri/resources/licenses/KaTeX-LICENSE.txt)，安装包同时包含该许可文件。

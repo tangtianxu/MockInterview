@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "MockInterview",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "identifier": "app.interviewcue.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -54,7 +54,8 @@
     ],
     "resources": {
       "resources/sherpa-onnx/*.dll": "sherpa-onnx/",
-      "resources/sherpa-onnx/*.txt": "sherpa-onnx/"
+      "resources/sherpa-onnx/*.txt": "sherpa-onnx/",
+      "resources/licenses/KaTeX-LICENSE.txt": "licenses/KaTeX-LICENSE.txt"
     },
     "createUpdaterArtifacts": false,
     "icon": [

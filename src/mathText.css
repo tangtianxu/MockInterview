@@ -1,0 +1,4 @@
+.math-text{display:block;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
+.math-text .katex{font-size:1.08em;color:inherit}
+.math-text .katex-display{max-width:100%;margin:.8em 0;overflow-x:auto;overflow-y:hidden;padding:.3em .1em;white-space:normal}
+.math-text .katex-display>.katex{text-align:left}

@@ -18,7 +18,7 @@
 .practice-conversation{flex:1;overflow-y:auto;padding:23px;display:flex;flex-direction:column;gap:15px}
 .practice-turn{display:flex;flex-direction:column;gap:10px}.practice-bubble{border:1px solid #2c4654;border-radius:15px;padding:15px 17px;background:#15283a;max-width:94%;line-height:1.65}
 .practice-bubble.candidate{align-self:flex-end;background:#15382f;border-color:#296a58}.practice-bubble.current{border-color:#4ac9b0;box-shadow:0 8px 32px #3fd5b513}
-.practice-bubble small{font-size:10px;color:#72d9c3;font-weight:700}.practice-bubble p{font-size:13px;margin:6px 0 0;white-space:pre-wrap}.practice-bubble span,.practice-mini-score{font-size:10px;color:#9aafbb}.practice-mini-score{padding:0 5px 15px;border-bottom:1px solid #263546}
+.practice-bubble small{font-size:10px;color:#72d9c3;font-weight:700}.practice-bubble p{font-size:13px;margin:6px 0 0;white-space:pre-wrap}.practice-bubble>span,.practice-mini-score{font-size:10px;color:#9aafbb}.practice-mini-score{padding:0 5px 15px;border-bottom:1px solid #263546}
 .practice-empty,.practice-feedback-empty{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;color:#7f96a7;padding:25px}
 .practice-empty svg,.practice-feedback-empty svg{color:#63cab6}.practice-empty h3,.practice-feedback-empty h3{font-size:14px;color:#d1e9e2;margin:15px 0 4px}.practice-empty p,.practice-feedback-empty p{font-size:11px;line-height:1.7}
 .practice-compose{border-top:1px solid #263746;padding:18px 23px;display:flex;flex-direction:column;gap:10px}.practice-compose label{font-size:11px;color:#9cc3bd}.practice-compose textarea{resize:vertical;font:inherit;font-size:12px;line-height:1.65;min-height:90px}.practice-compose .start-btn{align-self:flex-end}

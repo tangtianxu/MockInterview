@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialog";
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
+import { MathText } from "./MathText";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
@@ -320,12 +321,12 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       </div>
       <div className="practice-conversation">
         {turns.map((turn,index)=><div className="practice-turn" key={turn.id}>
-          <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p>{turn.question}</p></div>
-          <div className="practice-bubble candidate"><small>我的回答</small><p>{turn.answer}</p></div>
+          <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p><MathText text={turn.question}/></p></div>
+          <div className="practice-bubble candidate"><small>我的回答</small><p><MathText text={turn.answer}/></p></div>
           <div className="practice-mini-score">参考评分 {turn.feedback.score}/5 · 回答依据：“{turn.feedback.evidence}”</div>
-          {turn.reference && <details className="practice-history-reference"><summary>{turn.feedback.questionKind==="technical" ? "查看参考答案" : "查看回答思路"}</summary><p>{turn.reference}</p></details>}
+          {turn.reference && <details className="practice-history-reference"><summary>{turn.feedback.questionKind==="technical" ? "查看参考答案" : "查看回答思路"}</summary><p><MathText text={turn.reference}/></p></details>}
         </div>)}
-        {question && !feedback && <div className="practice-bubble interviewer current"><small>面试官 · 当前问题</small><p>{question.question}</p><span>{question.topic}</span></div>}
+        {question && !feedback && <div className="practice-bubble interviewer current"><small>面试官 · 当前问题</small><p><MathText text={question.question}/></p><span>{question.topic}</span></div>}
         {!question && !busy && <div className="practice-empty"><AudioLines size={31}/><h3>准备开始模拟面试</h3><p>设置范围、难度和时长后，模型会逐题提问。</p></div>}
         {busy === "question" && <div className="practice-empty">正在准备下一题…</div>}
       </div>
@@ -346,15 +347,15 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <h3>本次回答片段</h3><p>“{feedback.evidence}”</p>
         {feedback.questionKind==="technical" ? <>
           {!!feedback.corrections?.length && <><h3>需要纠正</h3>{feedback.corrections.map((item,index)=><div className="practice-knowledge-point" key={index}>
-            <blockquote>“{item.quote}”</blockquote><p>{item.explanation}</p><p className="practice-correct">正确理解：{item.correct}</p></div>)}</>}
+            <blockquote>“{item.quote}”</blockquote><p><MathText text={item.explanation}/></p><p className="practice-correct"><MathText text={`正确理解：${item.correct}`}/></p></div>)}</>}
           {!!feedback.missingPoints?.length && <><h3>本题漏答的知识点</h3>{feedback.missingPoints.map((item,index)=><div className="practice-knowledge-point" key={index}>
-            <strong>{item.point}</strong><p>{item.explanation}</p></div>)}</>}
+            <strong>{item.point}</strong><p><MathText text={item.explanation}/></p></div>)}</>}
           {!feedback.corrections?.length && !feedback.missingPoints?.length && <p className="practice-feedback-note">本次评价未指出明确的错漏知识点。</p>}
         </> : <>
           {!!feedback.missing?.length && <><h3>对照本题检查</h3><ul>{feedback.missing.map((item,index)=><li key={index}>{aspects[item]}</li>)}</ul></>}
         </>}
         <div className="practice-reference-answer"><h3>{feedback.questionKind==="technical" ? "参考答案" : "回答思路"}</h3>
-          {reference.text && <p>{reference.text}</p>}
+          {reference.text && <p><MathText text={reference.text}/></p>}
           {reference.loading && <p role="status">{reference.text ? "正在继续生成…" : "回答模型正在生成参考内容…"}</p>}
           {reference.error && <p className="practice-reference-error" role="alert">{reference.error}</p>}
           {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={!!busy}
