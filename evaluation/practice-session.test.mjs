@@ -1,6 +1,23 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate} from "../src/practiceSession.ts";
+import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground} from "../src/practiceSession.ts";
+
+test("background snapshots preserve domain and bounded project facts without leaking them into technical practice",()=>{
+  const input={scope:"project",difficulty:"medium",role:"机器人算法",topics:"VLA",domain:"ai",local:true,
+    personalization:"回复简短",resume:{text:"机械臂".repeat(5000)},analysis:{summary:"SO-101 微调"}};
+  const background=practiceBackground(input);
+  input.topics="通信";
+  input.analysis.summary="后续修改";
+  assert.equal(background.topics,"人工智能；VLA");
+  assert.equal(background.resumeText.length,8000);
+  assert.match(background.resumeAnalysis,/SO-101/);
+  assert.equal(Object.hasOwn(background,"consentToSendResume"),false);
+  const technical=practiceBackground({...input,scope:"technical",local:false});
+  assert.equal(technical.resumeText,"");
+  assert.equal(technical.resumeAnalysis,"");
+  assert.equal(technical.preferences,"");
+  assert.equal(technical.role,"机器人算法");
+});
 
 test("all questions survive long answers and a session longer than six turns",()=>{
   const turns=Array.from({length:12},(_,index)=>({question:`第 ${index+1} 个考点？`,answer:"很长的作答".repeat(500)}));

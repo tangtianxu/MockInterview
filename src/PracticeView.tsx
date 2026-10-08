@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialog";
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
-import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate} from "./practiceSession";
+import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
 type SttSettings = { mode: "local" | "api"; engine: string; model: string; apiProvider: string;
@@ -14,7 +14,7 @@ export type PracticeConfig = { minutes: number; scope: "technical" | "project" |
 export type Resume = { name: string; text: string; truncated: boolean; hash: string };
 export type Analysis = { summary: string; skills?: string[]; projects?: string[];
   uncertainties?: string[]; suggestedTopics?: string[] };
-type Question = { question: string; topic?: string; intent?: string };
+type Question = { question: string; topic?: string; intent?: string; background?:PracticeBackground };
 type Feedback = { score:number;evidence:string;questionKind?:string;missing?:string[];
   corrections?:{quote:string;explanation:string;correct:string}[];missingPoints?:{point:string;explanation:string}[] };
 type Turn = { id:string;question:string;answer:string;feedback:Feedback;reference?:string };
@@ -84,22 +84,23 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     return () => window.clearInterval(timer);
   },[active]);
 
-  const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,unknown> = {}) => {
+  const currentBackground=()=>practiceBackground({scope:config.scope,difficulty:config.difficulty,role,topics,
+    domain,local,personalization,resume,analysis});
+  const authorizeBackground=async (background:PracticeBackground,label:string,projectQuestion=false)=>{
+    if(local)return false;
+    const includesResume=!!(background.resumeText || background.resumeAnalysis);
+    if(!includesResume && !projectQuestion)return false;
+    const destination=(()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
+    const agreed=await confirmSend(`本次${label}会将领域、岗位、主题及当前问题${label==="评价" ? "与你的作答" : ""}${includesResume ? "、简历摘录（最多 8,000 字）和本地分析" : "（可能包含项目相关信息）"}发送至 ${destination}。仅本次授权，是否继续？`,
+      {title:"确认本次背景发送",kind:"warning"});
+    if(!agreed)throw new Error("已取消本次请求");
+    return agreed;
+  };
+  const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,unknown> = {}, background=currentBackground()) => {
     if (local) await invoke("start_local_service",{service:"ollama"});
-    const includesResume = action !== "analyze" && config.scope !== "technical" && !!resume;
-    let consentToSendResume = false;
-    if (!local && includesResume) {
-      const destination = (()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
-      consentToSendResume = await confirmSend(`本次${action === "ask" ? "出题" : "评价"}请求将把简历摘录（最多 8,000 字）、本地分析、问题${action === "evaluate" ? "及你的回答" : "与最近的问答摘要"}发送至 ${destination}。仅本次授权，是否继续？`,
-        {title:"确认本次简历发送",kind:"warning"});
-      if (!consentToSendResume) throw new Error("已取消本次简历发送");
-    }
+    const consentToSendResume=action==="analyze" ? false : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
     return invoke<Record<string,unknown>>("practice_model",{endpoint:model,input:{
-      action,scope:config.scope,difficulty:config.difficulty,minutes:config.minutes,
-      role,topics:[domain !== "general" ? domain === "ai" ? "人工智能" : "通信" : "",topics].filter(Boolean).join("；"),
-      preferences:local ? personalization || "" : "",
-      resumeText:includesResume && resume ? resume.text.slice(0,8000) : "",
-      resumeAnalysis:includesResume && analysis ? JSON.stringify(analysis) : "",
+      ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
       consentToSendResume,history:"",askedQuestions:[],question:"",questionKind:"",answer:"",...fields,
     }});
   };
@@ -135,13 +136,9 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const stillCurrent=()=>referenceRequestRef.current===current && sessionEpochRef.current===epoch;
     setReference({text:"",loading:true,error:""});
     try {
-      if(!local && currentQuestion.intent!=="technical"){
-        const destination=(()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
-        const agreed=await confirmSend(`本次参考思路生成会把当前项目相关问题和回答偏好发送至 ${destination}，问题可能包含简历相关信息。不发送简历原文、本地分析或你的作答。仅本次授权，是否继续？`,
-          {title:"确认本次参考思路请求",kind:"warning"});
-        if(!stillCurrent())return;
-        if(!agreed)throw new Error("已取消本次请求");
-      }
+      const background=currentQuestion.background || currentBackground();
+      const consentToSendResume=await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
+      if(!stillCurrent())return;
       if(local)await invoke("start_local_service",{service:"ollama"});
       if(!stillCurrent())return;
       const stop=await listen<{requestId:string;token:string}>("mvp_answer_token",event=>{
@@ -157,7 +154,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       referenceStopsRef.current.push(stop);
       await invoke("mvp_answer",{endpoint:model,requestId:current.id,question:currentQuestion.question,
         focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
-        answerInstructions:personalization || ""});
+        practiceContext:{...background,preferences:local ? background.preferences : "",consentToSendResume}});
       if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
     }catch(cause){if(stillCurrent()){
       setReference(value=>({...value,error:`参考生成失败：${String(cause)}`}));
@@ -186,11 +183,12 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     setBusy("question");setError("");
     try {
       const history=practiceHistory(previous);
-      const value = await request("ask",history) as Question;
+      const background=currentBackground();
+      const value = await request("ask",history,background) as Question;
       if(!operationRef.current.current(token))return false;
       if(!value.question?.trim() || repeatedPracticeQuestion(value.question,history.askedQuestions))
         throw new Error("服务返回了空题目或重复题目，已阻止展示，请重试下一题。");
-      setQuestion(value);setFeedback(null);setDraft("");
+      setQuestion({...value,background});setFeedback(null);setDraft("");
       return true;
     } catch (cause) {if(operationRef.current.current(token))setError(`生成问题失败：${String(cause)}`);return false;}
     finally {if(operationRef.current.finish(token))setBusy(null);}
@@ -214,7 +212,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if (micOnRef.current) await stopMic();
     setBusy("feedback");setError("");
     try {
-      const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer});
+      const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer},currentQuestion.background);
       if(!operationRef.current.current(token))return;
       const result = value as Feedback;
       setFeedback(result);
