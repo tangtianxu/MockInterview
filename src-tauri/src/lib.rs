@@ -441,6 +441,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             mvp_commands::mvp_list_models,
             mvp_commands::mvp_test_model_endpoint,
+            mvp_commands::mvp_copy_model_key,
             mvp_commands::mvp_decide,
             mvp_commands::mvp_answer,
             mvp_commands::mvp_explain,

@@ -12,7 +12,9 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
 import { readablePreview } from "./answerDisplay";
-import { discoveredModel, providerDefaults, type ModelApi } from "./modelProviders";
+import {connectModel,validateModelAddress} from "./modelConnection";
+import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
+  type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
 
 type Api = ModelApi;
@@ -20,7 +22,6 @@ type SttMode = "local" | "api";
 type SttApiProvider = "groq_whisper" | "deepgram";
 type Mode = "live" | "video";
 type Status = "idle" | "listening" | "deciding" | "generating" | "error";
-type ModelConfig = { api: Api; baseUrl: string; model: string };
 type ModelEndpoint = ModelConfig & { credentialSlot: string };
 type OllamaRuntime = { executable: string | null; configuredExecutable: string | null;
   configFile: string; modelsDirectory: string | null; connected: boolean };
@@ -29,6 +30,7 @@ type Settings = {
   mode: Mode; output: string; mic: string; sttMode: SttMode; sttEngine: string; sttModel: string;
   sttApiProvider: SttApiProvider; sttApiModel: string; domain: "general" | "ai" | "communication";
   decision: ModelConfig; answer: ModelConfig; answerInstructions: string;
+  sharedModelConnection: boolean; separateDecision?: ModelConfig;
   launcherOnTop: boolean; quitShortcut: string;
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
@@ -55,9 +57,10 @@ const defaults: Settings = {
   launcherOnTop: false, quitShortcut: "Control+Backquote",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
-  decision: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct"},
-  answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct"},
+  decision: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
+  answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answerInstructions: "",
+  sharedModelConnection: true,
 };
 
 function loadSettings(input?: unknown): Settings {
@@ -75,7 +78,12 @@ function loadSettings(input?: unknown): Settings {
     };
     let previousPractice: {role?:string;topics?:string} = {};
     try {previousPractice=JSON.parse(localStorage.getItem("interviewCue.practiceConfig") || "{}");} catch { /* Older settings may be malformed. */ }
-    return {...defaults,...old,sttEngine,sttModel,
+    const decision=normalize({...defaults.decision,...shared,model:old.decisionModel || defaults.decision.model,...old.decision,
+      modelSelection:old.decision?.modelSelection || (old.decision || old.decisionModel || old.api ? "manual" : "auto")});
+    const answer=normalize({...defaults.answer,...shared,model:old.answerModel || defaults.answer.model,...old.answer,
+      modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
+    const sharedModelConnection=sharedConnectionDefault(old);
+    return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
       targetRole:typeof old.targetRole === "string" ? old.targetRole.slice(0,120) :
         (typeof previousPractice.role === "string" ? previousPractice.role.slice(0,120) : ""),
       focusTopics:typeof old.focusTopics === "string" ? old.focusTopics.slice(0,300) :
@@ -87,8 +95,7 @@ function loadSettings(input?: unknown): Settings {
       answerVisible:old.answerVisible !== false,
       theme:old.theme === "light" ? "light" : "dark",
       opacity:Math.max(70,Math.min(100,Number(old.opacity) || 100)),
-      decision:normalize({...defaults.decision,...shared,model:old.decisionModel || defaults.decision.model,...old.decision}),
-      answer:normalize({...defaults.answer,...shared,model:old.answerModel || defaults.answer.model,...old.answer})};
+      decision:sharedModelConnection ? answer : decision,answer};
   }
   catch { return defaults; }
 }
@@ -144,8 +151,8 @@ function credentialSlot(config: ModelConfig, stage: "decision" | "answer"): stri
   catch {return `interview_cue_${stage}@invalid`;}
 }
 
-function endpoint(config: ModelConfig, stage: "decision" | "answer"): ModelEndpoint {
-  return {...config, credentialSlot:credentialSlot(config,stage)};
+function endpoint(config: ModelConfig, stage: "decision" | "answer", shared=false): ModelEndpoint {
+  return {...config, credentialSlot:credentialSlot(config,shared ? "answer" : stage)};
 }
 
 function topicBackground(settings:Settings,resume:Resume|null,analysis:Analysis|null,includeResume:boolean) {
@@ -268,6 +275,11 @@ function Main() {
   const [modelErrors, setModelErrors] = useState<{decision:string;answer:string}>({decision:"",answer:""});
   const [modelTests, setModelTests] = useState<{decision:string;answer:string}>({decision:"",answer:""});
   const [testingModel, setTestingModel] = useState<"decision" | "answer" | null>(null);
+  const [linkingModels,setLinkingModels]=useState(false);
+  const [connectedModels,setConnectedModels]=useState<{decision:string;answer:string}>({decision:"",answer:""});
+  const [advancedModels,setAdvancedModels]=useState<{decision:boolean;answer:boolean}>({decision:false,answer:false});
+  const modelActionRef=useRef(false);
+  const connectionEpochRef=useRef(0);
   const [diagnostics, setDiagnostics] = useState<DiagnosticEntry[]>(loadDiagnostics);
   const [savedKeys, setSavedKeys] = useState<Record<string,boolean>>({});
   const [keyDrafts, setKeyDrafts] = useState<Record<string,string>>({});
@@ -564,22 +576,33 @@ function Main() {
       try {setPrivacy(await invoke<PrivacyDisplayState>("get_privacy_display_state"));}catch { /* Keep last observed state. */ }
     } finally {setPrivacyBusy(false);}
   };
-  const refreshModels = useCallback(async (stage: "decision" | "answer", selectDiscovered=false): Promise<string[]|null> => {
+  const commitModelConfig=useCallback((stage:"decision"|"answer",patch:Partial<ModelConfig>)=>{
+    connectionEpochRef.current++;
+    const next=patchModelConnection(settingsRef.current,stage,patch);
+    settingsRef.current=next;
+    setSettings(next);
+    setConnectedModels(current=>next.sharedModelConnection ? {decision:"",answer:""} : {...current,[stage]:""});
+    setModelTests(current=>next.sharedModelConnection ? {decision:"",answer:""} : {...current,[stage]:""});
+  },[]);
+  const refreshModels = useCallback(async (requestedStage: "decision" | "answer", selectDiscovered=false): Promise<string[]|null> => {
+    const shared=settingsRef.current.sharedModelConnection;
+    const stage=shared ? "answer" : requestedStage;
     const config = settingsRef.current[stage];
+    const epoch=connectionEpochRef.current;
     try {
       const names = await invoke<string[]>("mvp_list_models", {endpoint:endpoint(config,stage)});
-      if (settingsRef.current[stage].api !== config.api || settingsRef.current[stage].baseUrl !== config.baseUrl) return null;
+      if(epoch!==connectionEpochRef.current)return null;
       if (stage === "decision") {setDecisionModels(names);setDecisionReady(true);}
       else {setAnswerModels(names);setAnswerReady(true);}
       setModelErrors(current=>({...current,[stage]:""}));
       if (selectDiscovered && names.length) {
-        const selected=discoveredModel(config.api,config.model,names);
-        setSettings(current=>({...current,[stage]:{...current[stage],model:selected}}));
+        const selected=connectionModel(config,names);
+        if(selected!==config.model)commitModelConfig(stage,{model:selected});
       }
       logDiagnostic("模型列表已刷新",`${stage} · ${config.api} · ${names.length} 个`);
       return names;
     } catch (cause) {
-      if (settingsRef.current[stage].api !== config.api || settingsRef.current[stage].baseUrl !== config.baseUrl) return null;
+      if(epoch!==connectionEpochRef.current)return null;
       if (stage === "decision") {setDecisionModels([]);setDecisionReady(false);}
       else {setAnswerModels([]);setAnswerReady(false);}
       const message=modelConnectionError(config,cause,true);
@@ -587,22 +610,50 @@ function Main() {
       logDiagnostic("模型列表获取失败",`${stage} · ${config.api} · ${message}`);
       return null;
     }
-  }, [logDiagnostic]);
+  }, [logDiagnostic,commitModelConfig]);
   const testModelEndpoint = async (stage: "decision" | "answer") => {
+    if(modelActionRef.current)return;
+    modelActionRef.current=true;
     const config=settingsRef.current[stage];
+    const shared=settingsRef.current.sharedModelConnection;
+    const slot=credentialSlot(config,shared ? "answer" : stage);
+    const epoch=connectionEpochRef.current;
     setTestingModel(stage);
     setModelTests(current=>({...current,[stage]:""}));
+    setConnectedModels(current=>({...current,[stage]:""}));
     try {
-      await invoke("mvp_test_model_endpoint",{endpoint:endpoint(config,stage)});
-      if (settingsRef.current[stage].baseUrl !== config.baseUrl || settingsRef.current[stage].model !== config.model) return;
-      setModelTests(current=>({...current,[stage]:"对话接口可用，当前模型已返回回答。"}));
-      logDiagnostic("模型对话接口可用",`${stage} · ${config.api} · ${config.model}`);
+      validateModelAddress(config);
+      const key=keyDrafts[slot]?.trim();
+      if(key){
+        await invoke("store_api_key",{provider:slot,key});
+        setSavedKeys(current=>({...current,[slot]:true}));
+        setKeyDrafts(current=>({...current,[slot]:""}));
+      }
+      const hasKey=key || await invoke<boolean>("has_api_key",{provider:slot});
+      if(serviceId(config)!=="custom" && config.api!=="ollama" && !hasKey)throw new Error("请先填入所选服务的 API 密钥。");
+      const result=await connectModel(config,{
+        list:async current=>{
+          const names=await invoke<string[]>("mvp_list_models",{endpoint:endpoint(current,stage,shared)});
+          if(epoch===connectionEpochRef.current){
+            if(stage==="answer"){setAnswerModels(names);setAnswerReady(true);}else{setDecisionModels(names);setDecisionReady(true);}
+          }
+          return names;
+        },
+        test:current=>invoke("mvp_test_model_endpoint",{endpoint:endpoint(current,stage,shared)})
+      });
+      if(epoch!==connectionEpochRef.current)return;
+      if(result.config.model!==config.model)commitModelConfig(stage,{model:result.config.model});
+      setConnectedModels(current=>({...current,[stage]:result.config.model}));
+      setModelErrors(current=>({...current,[stage]:result.listError ? modelConnectionError(config,result.listError,true) : ""}));
+      setModelTests(current=>({...current,[stage]:`已连接 · ${result.config.model}。聊天请求已返回有效文字。`}));
+      logDiagnostic("模型对话接口可用",`${stage} · ${config.api} · ${result.config.model}`);
     } catch (cause) {
-      if (settingsRef.current[stage].baseUrl !== config.baseUrl || settingsRef.current[stage].model !== config.model) return;
+      if(epoch!==connectionEpochRef.current)return;
       const message=modelConnectionError(config,cause);
-      setModelTests(current=>({...current,[stage]:`对话接口测试失败：${message}`}));
+      setModelTests(current=>({...current,[stage]:`连接未通过：${message}`}));
+      setAdvancedModels(current=>({...current,[stage]:true}));
       logDiagnostic("模型对话接口失败",`${stage} · ${config.api} · ${message}`);
-    } finally {setTestingModel(null);}
+    } finally {setTestingModel(null);modelActionRef.current=false;}
   };
   const refreshOllamaRuntime = useCallback(async () => {
     setOllamaChecking(true);
@@ -638,6 +689,7 @@ function Main() {
     } catch (cause) { setError(`选择语音模型目录失败：${String(cause)}`); }
   };
   useEffect(() => {
+    if(settings.sharedModelConnection)return;
     const config=settings.decision;
     if (!config.baseUrl) return;
     if (config.api === "ollama") {void refreshModels("decision",true);return;}
@@ -649,7 +701,7 @@ function Main() {
       if (present) void refreshModels("decision",true);
     }).catch(()=>{});
     return ()=>{active=false;};
-  }, [settings.decision.api,settings.decision.baseUrl,refreshModels]);
+  }, [settings.decision.api,settings.decision.baseUrl,settings.sharedModelConnection,refreshModels]);
   useEffect(() => {
     const config=settings.answer;
     if (!config.baseUrl) return;
@@ -679,17 +731,48 @@ function Main() {
       if (stage === "decision") {setDecisionModels([]);setDecisionReady(false);}
       if (stage === "answer") {setAnswerModels([]);setAnswerReady(false);}
       if (stage) setModelErrors(current=>({...current,[stage]:""}));
+      if (stage) {
+        connectionEpochRef.current++;
+        setConnectedModels(current=>({...current,[stage]:""}));
+        setModelTests(current=>({...current,[stage]:""}));
+      }
       logDiagnostic("API 密钥已删除",stage || "语音识别");
     }
     catch (cause) {setError(`删除密钥失败：${String(cause)}`);}
   };
-  const configureStage = (stage:"decision"|"answer", api:Api) => {
-    updateStage(stage,{api,...providerDefaults(api)});
+  const configureStage = (stage:"decision"|"answer", service:ServiceId) => {
+    const config=serviceDefaults(service);
+    commitModelConfig(stage,config);
     if (stage === "decision") {setDecisionModels([]);setDecisionReady(false);}
     else {setAnswerModels([]);setAnswerReady(false);}
     setModelErrors(current=>({...current,[stage]:""}));
     setModelTests(current=>({...current,[stage]:""}));
-    logDiagnostic("模型服务已切换",`${stage} · ${api}`);
+    setAdvancedModels(current=>({...current,[stage]:service==="custom"}));
+    logDiagnostic("模型服务已切换",`${stage} · ${service}`);
+  };
+  const toggleSharedModels=async (enabled:boolean)=>{
+    if(modelActionRef.current || running || practiceActive)return;
+    modelActionRef.current=true;setLinkingModels(true);
+    const current=settingsRef.current;
+    try {
+      const decision=enabled ? current.answer : current.separateDecision || {...current.answer};
+      const sameAddress=current.decision.api===current.answer.api &&
+        current.decision.baseUrl.trim().replace(/\/+$/,"")===current.answer.baseUrl.trim().replace(/\/+$/,"");
+      if(enabled && sameAddress && current.answer.api!=="ollama" && current.answer.baseUrl){
+        const present=await invoke<boolean>("mvp_copy_model_key",{endpoint:endpoint(current.decision,"decision"),targetStage:"answer"});
+        setSavedKeys(keys=>({...keys,[credentialSlot(current.answer,"answer")]:present}));
+      }else if(!enabled && !current.separateDecision && current.answer.api!=="ollama" && current.answer.baseUrl){
+        const present=await invoke<boolean>("mvp_copy_model_key",{endpoint:endpoint(current.answer,"answer"),targetStage:"decision"});
+        setSavedKeys(keys=>({...keys,[credentialSlot(decision,"decision")]:present}));
+      }
+      const next={...current,sharedModelConnection:enabled,decision,
+        separateDecision:enabled ? current.decision : undefined};
+      connectionEpochRef.current++;settingsRef.current=next;setSettings(next);
+      setDecisionModels([]);setDecisionReady(false);
+      setConnectedModels({decision:"",answer:""});setModelTests({decision:"",answer:""});
+      setModelErrors({decision:"",answer:""});setError("");
+    }catch(cause){setError(`连接配置未切换：${String(cause)}`);}
+    finally{setLinkingModels(false);modelActionRef.current=false;}
   };
   const startService = async () => {
     setStartingService(true);setError("");
@@ -843,7 +926,7 @@ function Main() {
       const recent = segmentsRef.current.filter(item => item.speaker !== "User" && item.id !== pending.sourceId).slice(-7)
         .map(item => item.text).join("\n");
       const decision = await invoke<Decision>("mvp_decide", {
-        endpoint:endpoint(settingsRef.current.decision,"decision"),
+        endpoint:endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),
         input:{ context:recent, currentText:pending.text, previousQuestion:questionRef.current,
           visibleQuestion:visibleQuestionRef.current, isFinal:pending.isFinal,
           videoMode:settingsRef.current.mode === "video",
@@ -1003,12 +1086,12 @@ function Main() {
 
   const chosenEngine = engines.find(item => item.engine === settings.sttEngine);
   const chosenModel = chosenEngine?.models.find(item => item.id === settings.sttModel);
-  const decisionChoices = useMemo(() => [...new Set(decisionModels)],[decisionModels]);
+  const decisionChoices = useMemo(() => [...new Set(settings.sharedModelConnection ? answerModels : decisionModels)],
+    [decisionModels,answerModels,settings.sharedModelConnection]);
   const answerChoices = useMemo(() => [...new Set(answerModels)],[answerModels]);
   const update = (patch: Partial<Settings>) => setSettings(current => ({...current,...patch}));
   const updateStage = (stage: "decision" | "answer", patch: Partial<ModelConfig>) => {
-    setSettings(current => ({...current,[stage]:{...current[stage],...patch}}));
-    setModelTests(current=>({...current,[stage]:""}));
+    commitModelConfig(stage,patch);
   };
 
   const start = async () => {
@@ -1017,11 +1100,11 @@ function Main() {
     if (settings.sttMode === "api" && !savedKeys[settings.sttApiProvider]) {setShowSettings(true);setError("请先保存语音识别 API 密钥");return;}
     if (!settings.decision.model.trim() || !settings.answer.model.trim()) {setShowSettings(true);setError("请先填写判别和回答模型 ID");return;}
     for (const stage of ["decision","answer"] as const) {
-      if (settings[stage].api === "deepseek" && !savedKeys[credentialSlot(settings[stage],stage)]) {
+      if (settings[stage].api === "deepseek" && !savedKeys[credentialSlot(settings[stage],settings.sharedModelConnection ? "answer" : stage)]) {
         setShowSettings(true);setError(`请先保存${stage === "decision" ? "判别" : "回答"}环节的 DeepSeek API 密钥`);return;
       }
     }
-    if ((settings.decision.api === "ollama" && !decisionReady) || (settings.answer.api === "ollama" && !answerReady)) {
+    if ((settings.decision.api === "ollama" && !(settings.sharedModelConnection ? answerReady : decisionReady)) || (settings.answer.api === "ollama" && !answerReady)) {
       setStartingService(true);
       try {
         await invoke("start_local_service",{service:"ollama"});
@@ -1125,43 +1208,46 @@ function Main() {
 
   const stageEditor = (stage: "decision" | "answer", title: string, choices: string[], ready: boolean) => {
     const config = settings[stage];
-    const slot = credentialSlot(config,stage);
-    return <div className="setting-group" key={stage}>
+    const slot = credentialSlot(config,settings.sharedModelConnection ? "answer" : stage);
+    const selectedService=serviceId(config);
+    const service=modelServices.find(item=>item.id===selectedService)!;
+    const busy=running || practiceActive || testingModel!==null || linkingModels;
+    const connected=connectedModels[stage]===config.model && Boolean(config.model);
+    return <div className="setting-group model-connection" key={stage}>
       <div className="setting-heading"><Sparkles size={18}/>{title}
-        <button className="text-link" onClick={()=>void refreshModels(stage,true)}>获取模型列表</button></div>
-      <label>模型服务<select value={config.api} onChange={e=>configureStage(stage,e.target.value as Api)} disabled={running}>
-        <option value="ollama">本地 Ollama</option>
-        <option value="deepseek">DeepSeek 官方 API</option>
-        <option value="openai">其他兼容接口（本地或云端）</option></select></label>
-      <label>接口地址<input value={config.baseUrl} onChange={e=>{
-        updateStage(stage,{baseUrl:e.target.value});
-        if (stage === "decision") {setDecisionModels([]);setDecisionReady(false);}
-        else {setAnswerModels([]);setAnswerReady(false);}
-        setModelErrors(current=>({...current,[stage]:""}));
-      }} disabled={running || config.api === "deepseek"} spellCheck={false}
-        placeholder={config.api === "openai" ? "https://服务地址/v1" : undefined}/></label>
+        <span className={`connection-badge ${connected ? "connected" : ""}`}>{connected ? "聊天已连接" : "待检测"}</span></div>
+      <label>选择服务<select value={selectedService} onChange={e=>configureStage(stage,e.target.value as ServiceId)} disabled={busy}>
+        {modelServices.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <p className="setting-help">{service.help}</p>
       {config.api !== "ollama" && <div className="key-control"><label>API 密钥（保存到 Windows 凭据管理器）
         <input type="password" value={keyDrafts[slot] || ""} onChange={e=>setKeyDrafts(current=>({...current,[slot]:e.target.value}))}
-          placeholder={savedKeys[slot]?"已保存；留空表示继续使用":"若服务要求密钥，请输入"} disabled={running}/></label>
-        <div className="key-actions"><button onClick={()=>void saveKey(slot,stage)} disabled={!keyDrafts[slot]?.trim() || running}>保存密钥</button>
-          {savedKeys[slot] && <button onClick={()=>void removeKey(slot,stage)} disabled={running}>删除已存密钥</button>}</div></div>}
-      <label>模型 ID<input value={config.model} onChange={e=>updateStage(stage,{model:e.target.value})}
-        disabled={running} spellCheck={false} placeholder="输入服务提供的模型 ID"/></label>
-      {choices.length > 0 && <label>已发现模型<select value={choices.includes(config.model)?config.model:""}
-        onChange={e=>{if(e.target.value)updateStage(stage,{model:e.target.value});}} disabled={running}>
-        <option value="">手动输入</option>{choices.map(model=><option key={model} value={model}>{model}</option>)}</select></label>}
+          placeholder={savedKeys[slot]?"已保存；留空继续使用，填写可替换":"粘贴所选服务的密钥"} disabled={busy}/></label>
+        {savedKeys[slot] && <div className="key-actions"><button onClick={()=>void removeKey(slot,stage)} disabled={busy}>删除已存密钥</button></div>}</div>}
+      <div className="connection-summary"><span>当前模型</span><strong>{config.model || "检测后选择"}</strong></div>
       <div className="setup-actions"><button className="download-btn" onClick={()=>void testModelEndpoint(stage)}
-        disabled={running || testingModel !== null || !config.baseUrl.trim() || !config.model.trim()}>
-        {testingModel===stage?"正在测试…":"测试对话接口"}</button></div>
+        disabled={busy || !config.baseUrl.trim()}>
+        {testingModel===stage?"正在检测连接…":"检测并连接"}</button>
+        <button className="text-link" onClick={()=>setAdvancedModels(current=>({...current,[stage]:!current[stage]}))}
+          aria-expanded={advancedModels[stage] || selectedService==="custom"}>高级设置 <ChevronDown size={14}/></button></div>
       {modelTests[stage] && <p className="setting-help" role="status">{modelTests[stage]}</p>}
       <p className="setting-help">{modelErrors[stage] ? `模型列表未获取：${modelErrors[stage]} 列表失败不等于对话接口不可用。` :
-        ready ? `已从服务获取 ${choices.length} 个模型；可在上方切换。` :
-        savedKeys[slot] ? "密钥已保存；请测试对话接口。" :
-        "尚未验证连接。自定义接口若不提供模型列表，可手动填写模型 ID。"}
-        {ready && choices.length > 0 && !choices.includes(config.model) && " 当前填写的模型 ID 不在返回列表中，请核对。"}
-        {config.api === "deepseek" && " DeepSeek 预设使用官方接口，并以非思考模式请求快速提示。"}
-        {config.api === "openai" && " 此项要求服务实现 /chat/completions；并非只能填写 OpenAI 官方地址。"}
-        {" 判别和回答可使用不同服务与模型。"}</p>
+        ready ? `已发现 ${choices.length} 个模型，可在高级设置中选择。` : "设置自动保存；密钥在点击检测时保存。"}
+        {config.api!=="ollama" && " 检测只发送简短测试文字，不发送简历或对话；可能产生少量服务费用。"}</p>
+      {(advancedModels[stage] || selectedService==="custom") && <div className="connection-advanced">
+        <label>接口地址<input value={config.baseUrl} onChange={e=>{
+          updateStage(stage,{baseUrl:e.target.value});
+          if(stage==="decision"){setDecisionModels([]);setDecisionReady(false);}else{setAnswerModels([]);setAnswerReady(false);}
+          setModelErrors(current=>({...current,[stage]:""}));
+        }} disabled={busy || config.api==="deepseek"} spellCheck={false} placeholder="https://服务地址/v1"/></label>
+        <p className="setting-help">使用服务的基础地址，不要包含 /chat/completions 或 /models。密钥只发送到此地址。</p>
+        <label>模型 ID<input value={config.model} onChange={e=>updateStage(stage,{model:e.target.value,modelSelection:"manual"})}
+          disabled={busy} spellCheck={false} placeholder="服务提供的聊天模型 ID"/></label>
+        {choices.length>0 && <label>从服务列表选择<select value={choices.includes(config.model)?config.model:""}
+          onChange={e=>{if(e.target.value)updateStage(stage,{model:e.target.value,modelSelection:"manual"});}} disabled={busy}>
+          <option value="">手动填写 / 未在列表中</option>{choices.map(model=><option key={model} value={model}>{model}</option>)}</select></label>}
+        <button className="text-link" disabled={busy || !config.baseUrl.trim()} onClick={()=>void refreshModels(stage,true)}>刷新模型列表</button>
+        <p className="setting-help">兼容服务需要支持聊天接口；出题、评价和判别还要求模型能按要求输出 JSON。聊天检测通过不代表所有模型都支持结构化结果。</p>
+      </div>}
     </div>;
   };
 
@@ -1180,7 +1266,7 @@ function Main() {
           onKeyDown={event=>{if(event.key==="Enter" && !running && !practiceActive)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
         <div data-tauri-drag-region><strong data-tauri-drag-region>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
           <span data-tauri-drag-region>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
-      <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : decisionReady && answerReady ? "本地模型已连接" : "本地模型未连接"}</span>
+      <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : (settings.sharedModelConnection ? answerReady : decisionReady && answerReady) ? "本地模型已连接" : "本地模型未连接"}</span>
         {workspaceMode==="assist" && <>
         <button className="ghost-btn panel-toggle" onClick={()=>update({compactView:!settings.compactView})} aria-pressed={!settings.compactView}
           disabled={!settings.compactView && visiblePanels===1} title="显示或隐藏控制区">
@@ -1384,6 +1470,15 @@ function Main() {
           <label>技术背景<select value={settings.domain} onChange={e=>update({domain:e.target.value as Settings["domain"]})} disabled={running}>
             <option value="general">通用技术</option><option value="ai">人工智能</option><option value="communication">通信与网络</option></select></label>
           <p className="setting-help">背景目前仅作为 Whisper.cpp 和 Groq 的短提示，不作为回答事实；Deepgram 暂不使用该选项。Groq 按音频段返回，实时性可能弱于流式服务；语音 API 会收到面试音频。</p></div>
+        <div className="setting-group"><div className="setting-heading"><Sparkles size={18}/> 模型连接方式</div>
+          <label className="connection-sharing"><input type="checkbox" checked={settings.sharedModelConnection}
+            disabled={running || practiceActive || testingModel!==null || linkingModels}
+            onChange={e=>void toggleSharedModels(e.target.checked)}/><span>判别与回答共用连接（推荐）</span></label>
+          <p className="setting-help">{linkingModels ? "正在切换连接设置…" : settings.sharedModelConnection
+            ? "只需设置一次服务、密钥和模型。练习出题与评价也使用这份连接。"
+            : "分别配置不同服务或模型。已有配置已保留；开启共用后采用回答生成的连接，关闭后恢复原判别配置。"}</p></div>
+        {!settings.sharedModelConnection && stageEditor("decision","语义判别",decisionChoices,decisionReady)}
+        {stageEditor("answer",settings.sharedModelConnection ? "共用模型连接" : "回答生成",answerChoices,answerReady)}
         {(settings.decision.api === "ollama" || settings.answer.api === "ollama") && <div className="setting-group ollama-setup">
           <div className="setting-heading"><Sparkles size={18}/> 本地 Ollama
             <button className="text-link" onClick={()=>void refreshOllamaRuntime()} disabled={ollamaChecking}>{ollamaChecking?"检测中…":"重新检测"}</button></div>
@@ -1408,8 +1503,6 @@ function Main() {
           {pullProgress && <p className="setting-help" role="status">{pullProgress}</p>}
           <p className="setting-help">下载完成后，在下方判别和回答设置中选择该模型。模型文件可能占用数 GB；API 模式无需安装 Ollama。</p>
         </div>}
-        {stageEditor("decision","语义判别",decisionChoices,decisionReady)}
-        {stageEditor("answer","回答生成",answerChoices,answerReady)}
         <div className="setting-group"><div className="setting-heading"><Pencil size={18}/> 回答要求</div>
           <p className="setting-help">自定义回答的表达方式、简短程度和关注方向；只影响后续回答及“展开细节”。留空使用内置要求。</p>
           <label>给回答模型的附加要求<textarea value={settings.answerInstructions} maxLength={1200} rows={7}

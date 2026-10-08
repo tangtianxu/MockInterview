@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "MockInterview",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "identifier": "app.interviewcue.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -49,7 +49,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "resources": {
       "resources/sherpa-onnx/*.dll": "sherpa-onnx/",
       "resources/sherpa-onnx/*.txt": "sherpa-onnx/"

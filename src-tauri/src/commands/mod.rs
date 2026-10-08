@@ -17,3 +17,4 @@ pub mod translation_model_commands;
 pub mod tray_commands;
 pub mod updater_commands;
 pub mod mvp_commands;
+mod practice_protocol;

@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialog";
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
+import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
 type SttSettings = { mode: "local" | "api"; engine: string; model: string; apiProvider: string;
@@ -14,8 +15,9 @@ export type Resume = { name: string; text: string; truncated: boolean; hash: str
 export type Analysis = { summary: string; skills?: string[]; projects?: string[];
   uncertainties?: string[]; suggestedTopics?: string[] };
 type Question = { question: string; topic?: string; intent?: string };
-type Feedback = { score: number; evidence: string; missing?: string[] };
-type Turn = { question: string; answer: string; feedback: Feedback };
+type Feedback = { score:number;evidence:string;questionKind?:string;missing?:string[];
+  corrections?:{quote:string;explanation:string;correct:string}[];missingPoints?:{point:string;explanation:string}[] };
+type Turn = { id:string;question:string;answer:string;feedback:Feedback;reference?:string };
 
 const initial: PracticeConfig = { minutes: 20, scope: "technical", difficulty: "medium" };
 const aspects: Record<string,string> = {
@@ -48,6 +50,12 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   const [draft, setDraft] = useState("");
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const turnsRef=useRef<Turn[]>([]);
+  const operationRef=useRef(new PracticeRequestGate());
+  const sessionEpochRef=useRef(0);
+  const referenceRequestRef=useRef<{id:string;turnId:string;text:string}|null>(null);
+  const referenceStopsRef=useRef<UnlistenFn[]>([]);
+  const [reference,setReference]=useState({text:"",loading:false,error:""});
   const [active, setActive] = useState(false);
   const [remaining, setRemaining] = useState(0);
   const [busy, setBusy] = useState<"resume" | "analyze" | "question" | "feedback" | null>(null);
@@ -63,10 +71,10 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   useEffect(() => {if(profileEpoch)setConfig(loadConfig());},[profileEpoch]);
   useEffect(() => {onSessionActiveChange?.(active);},[active,onSessionActiveChange]);
   useEffect(() => {
-    const hint=feedback ? `参考评分 ${feedback.score}/5。${(feedback.missing || []).slice(0,2).map(code=>aspects[code]).filter(Boolean).join(" ")}` :
+    const hint=feedback ? reference.text || `参考评分 ${feedback.score}/5。${(feedback.missingPoints || []).slice(0,2).map(item=>item.explanation).join(" ") || (feedback.missing || []).slice(0,2).map(code=>aspects[code]).filter(Boolean).join(" ")}` :
       active ? "请先口头回答；提交后查看复盘。" : "设置练习范围后开始。";
     onPreviewChange?.({question:question?.question || "",hint});
-  },[question,feedback,active,onPreviewChange]);
+  },[question,feedback,reference.text,active,onPreviewChange]);
   useEffect(() => {
     if (!active) return;
     const timer = window.setInterval(() => setRemaining(value => {
@@ -76,7 +84,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     return () => window.clearInterval(timer);
   },[active]);
 
-  const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,string> = {}) => {
+  const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,unknown> = {}) => {
     if (local) await invoke("start_local_service",{service:"ollama"});
     const includesResume = action !== "analyze" && config.scope !== "technical" && !!resume;
     let consentToSendResume = false;
@@ -92,7 +100,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       preferences:local ? personalization || "" : "",
       resumeText:includesResume && resume ? resume.text.slice(0,8000) : "",
       resumeAnalysis:includesResume && analysis ? JSON.stringify(analysis) : "",
-      consentToSendResume,history:"",question:"",answer:"",...fields,
+      consentToSendResume,history:"",askedQuestions:[],question:"",questionKind:"",answer:"",...fields,
     }});
   };
   const importResume = async () => {
@@ -110,34 +118,114 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     catch (cause) {setError(`简历分析失败：${String(cause)}`);}
     finally {setBusy(null);}
   };
-  const ask = async (previous: Turn[] = turns): Promise<boolean> => {
+  const cancelReference=()=>{
+    const current=referenceRequestRef.current;referenceRequestRef.current=null;
+    if(current){
+      void invoke("mvp_cancel_answer",{requestId:current.id}).catch(()=>{});
+      const next=turnsRef.current.map(turn=>turn.id===current.turnId ? {...turn,reference:undefined} : turn);
+      turnsRef.current=next;setTurns(next);
+    }
+    for(const stop of referenceStopsRef.current.splice(0))stop();
+    setReference({text:"",loading:false,error:""});
+  };
+  const generateReference=async (currentQuestion:Question,turnId:string,epoch=sessionEpochRef.current)=>{
+    if(referenceRequestRef.current)return;
+    const current={id:`practice-reference-${crypto.randomUUID()}`,turnId,text:""};
+    referenceRequestRef.current=current;
+    const stillCurrent=()=>referenceRequestRef.current===current && sessionEpochRef.current===epoch;
+    setReference({text:"",loading:true,error:""});
+    try {
+      if(!local && currentQuestion.intent!=="technical"){
+        const destination=(()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
+        const agreed=await confirmSend(`本次参考思路生成会把当前项目相关问题和回答偏好发送至 ${destination}，问题可能包含简历相关信息。不发送简历原文、本地分析或你的作答。仅本次授权，是否继续？`,
+          {title:"确认本次参考思路请求",kind:"warning"});
+        if(!stillCurrent())return;
+        if(!agreed)throw new Error("已取消本次请求");
+      }
+      if(local)await invoke("start_local_service",{service:"ollama"});
+      if(!stillCurrent())return;
+      const stop=await listen<{requestId:string;token:string}>("mvp_answer_token",event=>{
+        if(!stillCurrent() || event.payload.requestId!==current.id)return;
+        current.text+=event.payload.token;
+        setReference({text:current.text,loading:true,error:""});
+        setTurns(value=>{
+          const next=value.map(turn=>turn.id===turnId ? {...turn,reference:current.text} : turn);
+          turnsRef.current=next;return next;
+        });
+      });
+      if(!stillCurrent()){stop();return;}
+      referenceStopsRef.current.push(stop);
+      await invoke("mvp_answer",{endpoint:model,requestId:current.id,question:currentQuestion.question,
+        focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
+        answerInstructions:personalization || ""});
+      if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
+    }catch(cause){if(stillCurrent()){
+      setReference(value=>({...value,error:`参考生成失败：${String(cause)}`}));
+      setTurns(value=>{
+        const next=value.map(turn=>turn.id===turnId ? {...turn,reference:undefined} : turn);
+        turnsRef.current=next;return next;
+      });
+    }}
+    finally{
+      if(stillCurrent()){
+        referenceRequestRef.current=null;
+        for(const stop of referenceStopsRef.current.splice(0))stop();
+        setReference(value=>({...value,loading:false}));
+      }
+    }
+  };
+  const endSession=()=>{
+    setActive(false);sessionEpochRef.current++;operationRef.current.reset();setBusy(null);
+    if(referenceRequestRef.current)cancelReference();
+    if(micOnRef.current)void stopMic();
+  };
+  const ask = async (previous: Turn[] = turnsRef.current): Promise<boolean> => {
+    const token=operationRef.current.begin();
+    if(token===null)return false;
+    cancelReference();
     setBusy("question");setError("");
     try {
-      const history = previous.slice(-6).map((turn,index) =>
-        `${index+1}. ${turn.question}\n回答摘要：${turn.answer.slice(0,180)}`).join("\n");
-      const value = await request("ask",{history});
-      setQuestion(value as Question);setFeedback(null);setDraft("");
+      const history=practiceHistory(previous);
+      const value = await request("ask",history) as Question;
+      if(!operationRef.current.current(token))return false;
+      if(!value.question?.trim() || repeatedPracticeQuestion(value.question,history.askedQuestions))
+        throw new Error("服务返回了空题目或重复题目，已阻止展示，请重试下一题。");
+      setQuestion(value);setFeedback(null);setDraft("");
       return true;
-    } catch (cause) {setError(`生成问题失败：${String(cause)}`);return false;}
-    finally {setBusy(null);}
+    } catch (cause) {if(operationRef.current.current(token))setError(`生成问题失败：${String(cause)}`);return false;}
+    finally {if(operationRef.current.finish(token))setBusy(null);}
   };
   const start = async () => {
+    if(operationRef.current.busy)return;
     if (liveRunning) {setError("请先结束实时聆听，再开始模拟练习。");return;}
     if (config.scope !== "technical" && !analysis) {setError("项目、混合或综合练习需要先导入并分析简历。");return;}
+    const epoch=++sessionEpochRef.current;cancelReference();turnsRef.current=[];
     setTurns([]);setQuestion(null);setFeedback(null);setRemaining(config.minutes*60);
-    if (await ask([])) setActive(true); else setRemaining(0);
+    const started=await ask([]);
+    if(epoch===sessionEpochRef.current){if(started)setActive(true);else setRemaining(0);}
   };
   const submit = async () => {
-    if (!question || !draft.trim()) return;
+    if (!question || !draft.trim() || feedback) return;
+    const token=operationRef.current.begin();
+    if(token===null)return;
+    const currentQuestion=question;
+    const currentAnswer=draft.trim();
+    const epoch=sessionEpochRef.current;
     if (micOnRef.current) await stopMic();
     setBusy("feedback");setError("");
     try {
-      const value = await request("evaluate",{question:question.question,answer:draft.trim()});
+      const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer});
+      if(!operationRef.current.current(token))return;
       const result = value as Feedback;
       setFeedback(result);
-      setTurns(current=>[...current,{question:question.question,answer:draft.trim(),feedback:result}]);
-    } catch (cause) {setError(`生成反馈失败：${String(cause)}`);}
-    finally {setBusy(null);}
+      const turnId=crypto.randomUUID();
+      const next=[...turnsRef.current,{id:turnId,question:currentQuestion.question,answer:currentAnswer,feedback:result}];
+      turnsRef.current=next;setTurns(next);
+      // Knowledge questions automatically receive an independent reference answer.
+      // Project-related questions require an explicit action/consent for the extra call.
+      if(result.questionKind==="technical")void generateReference(currentQuestion,turnId,epoch);
+    } catch (cause) {if(operationRef.current.current(token))setError(`生成反馈失败：${String(cause)}`);}
+    finally {if(operationRef.current.finish(token))setBusy(null);}
   };
 
   const stopMic = async () => {
@@ -183,6 +271,10 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     }
   };
   useEffect(() => () => {
+    sessionEpochRef.current++;operationRef.current.reset();
+    const referenceRequest=referenceRequestRef.current;referenceRequestRef.current=null;
+    if(referenceRequest)void invoke("mvp_cancel_answer",{requestId:referenceRequest.id}).catch(()=>{});
+    for(const stop of referenceStopsRef.current.splice(0))stop();
     for (const stop of unlistenRef.current.splice(0)) stop();
     if (micOnRef.current) {micOnRef.current=false;void invoke("stop_capture");}
   },[]);
@@ -225,14 +317,15 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       <div className="panel-header"><div><span className="panel-kicker">模拟现场</span><h2>模拟面试</h2></div><span className="panel-count"><Clock3 size={15}/> {minutesLabel(remaining)}</span></div>
       <div className="practice-controls">
         {!active && <button className="start-btn" disabled={!!busy} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
-        {active && <button className="stop-btn" onClick={()=>{setActive(false);if(micOnRef.current)void stopMic();}}><Square size={14}/> 结束练习</button>}
+        {active && <button className="stop-btn" onClick={endSession}><Square size={14}/> 结束练习</button>}
         <span>{turns.length} 题已答 · 平均 {average}/5</span>
       </div>
       <div className="practice-conversation">
-        {turns.map((turn,index)=><div className="practice-turn" key={index}>
+        {turns.map((turn,index)=><div className="practice-turn" key={turn.id}>
           <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p>{turn.question}</p></div>
           <div className="practice-bubble candidate"><small>我的回答</small><p>{turn.answer}</p></div>
           <div className="practice-mini-score">参考评分 {turn.feedback.score}/5 · 回答依据：“{turn.feedback.evidence}”</div>
+          {turn.reference && <details className="practice-history-reference"><summary>{turn.feedback.questionKind==="technical" ? "查看参考答案" : "查看回答思路"}</summary><p>{turn.reference}</p></details>}
         </div>)}
         {question && !feedback && <div className="practice-bubble interviewer current"><small>面试官 · 当前问题</small><p>{question.question}</p><span>{question.topic}</span></div>}
         {!question && !busy && <div className="practice-empty"><AudioLines size={31}/><h3>准备开始模拟面试</h3><p>设置范围、难度和时长后，模型会逐题提问。</p></div>}
@@ -253,9 +346,25 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       {feedback ? <div className="practice-feedback-body">
         <div className="practice-score">{feedback.score}<span>/ 5</span></div>
         <h3>本次回答片段</h3><p>“{feedback.evidence}”</p>
-        {!!feedback.missing?.length && <><h3>可考虑补充的方面</h3><ul>{feedback.missing.map((item,index)=><li key={index}>{aspects[item]}</li>)}</ul></>}
-        <p className="practice-feedback-note">这里仅给回答思路，不生成第一人称项目表述。涉及个人经历时，只补充自己确实做过且能核对的内容；评分仍可能有误。</p>
-        <button className="start-btn" disabled={!active || !!busy} onClick={()=>void ask()}>下一题</button>
+        {feedback.questionKind==="technical" ? <>
+          {!!feedback.corrections?.length && <><h3>需要纠正</h3>{feedback.corrections.map((item,index)=><div className="practice-knowledge-point" key={index}>
+            <blockquote>“{item.quote}”</blockquote><p>{item.explanation}</p><p className="practice-correct">正确理解：{item.correct}</p></div>)}</>}
+          {!!feedback.missingPoints?.length && <><h3>本题漏答的知识点</h3>{feedback.missingPoints.map((item,index)=><div className="practice-knowledge-point" key={index}>
+            <strong>{item.point}</strong><p>{item.explanation}</p></div>)}</>}
+          {!feedback.corrections?.length && !feedback.missingPoints?.length && <p className="practice-feedback-note">本次评价未指出明确的错漏知识点。</p>}
+        </> : <>
+          {!!feedback.missing?.length && <><h3>对照本题检查</h3><ul>{feedback.missing.map((item,index)=><li key={index}>{aspects[item]}</li>)}</ul></>}
+        </>}
+        <div className="practice-reference-answer"><h3>{feedback.questionKind==="technical" ? "参考答案" : "回答思路"}</h3>
+          {reference.text && <p>{reference.text}</p>}
+          {reference.loading && <p role="status">{reference.text ? "正在继续生成…" : "回答模型正在生成参考内容…"}</p>}
+          {reference.error && <p className="practice-reference-error" role="alert">{reference.error}</p>}
+          {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={!!busy}
+            onClick={()=>{const turn=turnsRef.current.slice(-1)[0];if(question && turn)void generateReference(question,turn.id);}}>
+            {reference.error ? "重新生成" : feedback.questionKind==="technical" ? "生成参考答案" : "生成参考思路"}</button>}
+        </div>
+        <p className="practice-feedback-note">参考内容由当前回答模型生成，技术事实与评分仍需核对。项目题只给组织思路，不编造本人做过的机制、职责或成果。</p>
+        <button className="start-btn" disabled={!active || !!busy || reference.loading} onClick={()=>void ask()}>下一题</button>
       </div> : <div className="practice-feedback-empty"><Sparkles size={30}/><h3>提交回答后查看反馈</h3><p>评分用于练习，不等同于真实面试评价。</p></div>}
     </section>
   </main>;
