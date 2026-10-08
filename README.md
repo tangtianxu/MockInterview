@@ -2,6 +2,8 @@
 
 当前版本：1.0.0。
 
+[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.0/MockInterview_1.0.0_x64-setup.exe) · [查看 1.0.0 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.0)
+
 面向 Windows 11 的中文技术面试练习桌面应用。用户设置目标岗位、关注主题、练习范围、难度和时长后，模型逐题扮演面试官；用户可以输入回答，也可以用麦克风转写回答。每题提交后，应用显示参考评分、回答中的实际片段，以及值得进一步说明的方面。
 
 这个工具用于练习表达和检查知识盲区。模型评分可能不准确，不能代表真实招聘评价。涉及项目经历时，反馈只指出回答思路和可补充的方面，不会替用户编写未经证实的职责、机制或成果。
