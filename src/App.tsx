@@ -1477,6 +1477,7 @@ function Main() {
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
       onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy}
       onPreviewChange={setPracticePreview}
+      onModelSettings={()=>{setSettingsTab("models");setShowSettings(true);}}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
       onResumeImported={importResume} onAnalysis={storeResumeAnalysis} onClearResume={clearResume}

@@ -8,7 +8,7 @@ test('failed profile reads, immediate quit, pending questions and late microphon
  const fixture='outputs/lifecycle-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import App from '/src/App.tsx';import '/src/index.css';
- mockWindows('launcher');localStorage.clear();window.calls=[];window.askGate=false;window.micGate=false;
+ mockWindows('launcher');if(!new URLSearchParams(location.search).has('keepStorage'))localStorage.clear();window.calls=[];window.askGate=false;window.micGate=false;
  const failed=new URLSearchParams(location.search).has('failed');
  mockIPC(async(command,args)=>{window.calls.push({command,args});
   if(command==='load_interview_profile'){if(failed)throw '模拟配置读取失败';return {settings:{},resumeAnalysis:null};}
@@ -32,6 +32,21 @@ test('failed profile reads, immediate quit, pending questions and late microphon
   for(let i=0;i<70;i++){if(server.exitCode!==null)throw new Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(resolve=>setTimeout(resolve,100));}
   browser=await chromium.launch({headless:true,channel:'msedge'});
   const create=async suffix=>{const page=await browser.newPage();page.setDefaultTimeout(5000);page.setDefaultNavigationTimeout(20000);await page.goto(url+(suffix||''));await page.getByRole('button',{name:'开始练习',exact:true}).waitFor();return page;};
+  await t.test('first-use guide is dismissible, persists and opens the correct settings',async()=>{
+   const page=await create();const guide=page.getByRole('region',{name:'首次使用指南'});await guide.waitFor();
+   assert.match(await guide.innerText(),/Paraformer/);assert.match(await guide.innerText(),/Zipformer/);assert.match(await guide.innerText(),/deepseek-flash/);
+   await page.screenshot({path:'outputs/setup-guide-dark.png'});
+   await guide.getByRole('button',{name:'已了解，收起指南'}).click();
+   await page.goto(url+'?keepStorage');await page.getByRole('button',{name:'开始练习',exact:true}).waitFor();
+   assert.equal(await guide.count(),0);
+   await page.getByRole('button',{name:'使用指南',exact:true}).click();await guide.waitFor();
+   await page.setViewportSize({width:680,height:820});
+   assert.ok(await guide.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'guide must not overflow horizontally');
+   await page.screenshot({path:'outputs/setup-guide-narrow.png'});
+   await guide.getByRole('button',{name:'打开模型与服务'}).click();
+   assert.equal(await page.getByRole('tab',{name:'模型与服务'}).getAttribute('aria-selected'),'true');
+   await page.close();
+  });
   await t.test('read failure never overwrites the existing profile',async()=>{
    const page=await create('?failed');await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'个人资料'}).click();
    await page.getByRole('alert').filter({hasText:'读取配置'}).waitFor();await page.waitForTimeout(600);

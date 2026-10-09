@@ -5,6 +5,7 @@ import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialo
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
 import { MathText } from "./MathText";
+import {SetupGuide} from "./SetupGuide";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
@@ -38,14 +39,16 @@ function minutesLabel(seconds: number) {
 
 export function PracticeView({model, domain, liveRunning, stt, personalization, onSessionActiveChange,
   resume, analysis, onResumeImported, onAnalysis, onClearResume, role, topics, onRoleChange, onTopicsChange,
-  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false}: {model: ModelEndpoint; domain: string;
+  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings}: {model: ModelEndpoint; domain: string;
   liveRunning: boolean; stt: SttSettings; personalization?: string; onSessionActiveChange?: (active:boolean)=>void;
   resume: Resume|null; analysis: Analysis|null; onResumeImported:(path:string,resume:Resume)=>void;
   onAnalysis:(analysis:Analysis)=>void; onClearResume:()=>void; role:string; topics:string;
   onRoleChange:(value:string)=>void; onTopicsChange:(value:string)=>void;
   setupVisible?:boolean; feedbackVisible?:boolean; resumePath?:string; resumeError?:string;
   onPreviewChange?:(preview:{question:string;hint:string})=>void;
-  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void}) {
+  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void}) {
+  const [guideVisible,setGuideVisible]=useState(()=>localStorage.getItem("mockInterview.setupGuideSeen")!=="1");
+  const dismissGuide=()=>{localStorage.setItem("mockInterview.setupGuideSeen","1");setGuideVisible(false);};
   const [config, setConfig] = useState<PracticeConfig>(loadConfig);
   const [question, setQuestion] = useState<Question | null>(null);
   const [draft, setDraft] = useState("");
@@ -299,10 +302,11 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   },[]);
   useEffect(() => {if (!active && micOnRef.current) void stopMic();},[active]);
 
-  return <main className={`practice-workspace${setupVisible?"":" practice-hide-setup"}${feedbackVisible?"":" practice-hide-feedback"}`}>
+  return <main className={`practice-workspace${setupVisible?"":" practice-hide-setup"}${feedbackVisible?"":" practice-hide-feedback"}${guideVisible && !active && !busy?" practice-with-guide":""}`}>
     <section className="practice-setup">
       <div className="hero-card practice-hero"><div className="hero-icon"><AudioLines size={25}/></div>
-        <h1>练习表达，<br/>看清薄弱点。</h1><p>模型担任模拟面试官。你作答后，它给出参考反馈与下一题。</p></div>
+        <h1>练习表达，<br/>看清薄弱点。</h1><p>模型担任模拟面试官。你作答后，它给出参考反馈与下一题。</p>
+        <button className="practice-secondary" disabled={active || !!busy || micStarting || updating} onClick={()=>setGuideVisible(value=>!value)}>使用指南</button></div>
       <div className="practice-options">
         <h2>练习设置</h2>
         <label>时长<select value={config.minutes} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,minutes:Number(event.target.value)}))}>
@@ -340,6 +344,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <span>{turns.length} 题已答 · 平均 {average}/5</span>
       </div>
       <div className="practice-conversation">
+        {guideVisible && !active && !busy && <SetupGuide onSettings={onModelSettings} onDismiss={dismissGuide}/>}
         {turns.map((turn,index)=><div className="practice-turn" key={turn.id}>
           <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p><MathText text={turn.question}/></p></div>
           <div className="practice-bubble candidate"><small>我的回答</small><p><MathText text={turn.answer}/></p></div>
@@ -347,7 +352,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           {turn.reference && <details className="practice-history-reference"><summary>{turn.feedback.questionKind==="technical" ? "查看参考答案" : "查看回答思路"}</summary><p><MathText text={turn.reference}/></p></details>}
         </div>)}
         {question && !feedback && <div className="practice-bubble interviewer current"><small>面试官 · 当前问题</small><p><MathText text={question.question}/></p><span>{question.topic}</span></div>}
-        {!question && !busy && <div className="practice-empty"><AudioLines size={31}/><h3>准备开始模拟面试</h3><p>设置范围、难度和时长后，模型会逐题提问。</p></div>}
+        {!question && !busy && !guideVisible && <div className="practice-empty"><AudioLines size={31}/><h3>准备开始模拟面试</h3><p>设置范围、难度和时长后，模型会逐题提问。</p></div>}
         {busy === "question" && <div className="practice-empty">正在准备下一题…</div>}
       </div>
       {question && !feedback && <div className="practice-compose"><label htmlFor="practice-answer">用麦克风转写，或自行输入回答</label>

@@ -2,6 +2,13 @@
 .practice-setup,.practice-dialogue,.practice-feedback{min-height:0;overflow-y:auto}
 .practice-setup{display:flex;flex-direction:column;gap:16px;padding:22px 17px;background:#0d1522;border-right:1px solid #202b3b}
 .practice-hero{min-height:210px}
+.practice-hero .practice-secondary{margin-top:14px}
+.setup-guide{padding:20px;border:1px solid #2c4b48;border-radius:16px;background:rgba(91,212,183,.06);line-height:1.7;overflow-wrap:anywhere;min-width:0}
+.setup-guide h3{margin:6px 0 10px;font-size:20px}.setup-guide h4{margin:0 0 6px;font-size:14px}
+.setup-guide p{font-size:13px;color:inherit;margin:8px 0}.setup-guide ol{padding-left:22px;margin:20px 0}
+.setup-guide li{padding-left:4px;margin:0 0 20px}.setup-guide code{font-size:12px;word-break:break-word}
+.setup-guide-actions{display:flex;flex-wrap:wrap;gap:10px}.setup-guide button{max-width:100%;white-space:normal}
+@media(max-width:680px){.setup-guide{padding:16px}.setup-guide h3{font-size:18px}.practice-with-guide .practice-dialogue{order:-1}}
 .practice-options{border:1px solid #273847;border-radius:15px;background:#111d2b;padding:17px 15px;display:flex;flex-direction:column;gap:10px}
 .practice-options h2{font-size:13px;margin:0 0 4px}.practice-options h2 span{font-weight:400;color:#91a8aa;font-size:11px}
 .practice-options p,.practice-analysis small{font-size:11px;line-height:1.6;color:#91aab6;margin:0}
