@@ -11,7 +11,7 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Maximize2, Mic2, Minus, MonitorPlay, Moon, PanelLeftClose, PanelLeftOpen, Pause, Pin, Play, Radio, RefreshCw, ScanText, Settings2, Sparkles, Sun,
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
-import { readablePreview } from "./answerDisplay";
+import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
 import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
@@ -32,6 +32,7 @@ type Settings = {
   sttApiProvider: SttApiProvider; sttApiModel: string; domain: "general" | "ai" | "communication";
   decision: ModelConfig; answer: ModelConfig; answerInstructions: string;
   sharedModelConnection: boolean; separateDecision?: ModelConfig;
+  parallelAnswer: boolean; parallelLocal: ModelConfig;
   launcherOnTop: boolean; quitShortcut: string;
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
@@ -62,6 +63,7 @@ const defaults: Settings = {
   answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answerInstructions: "",
   sharedModelConnection: true,
+  parallelAnswer: false, parallelLocal: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"manual"},
 };
 
 function loadSettings(input?: unknown): Settings {
@@ -85,6 +87,8 @@ function loadSettings(input?: unknown): Settings {
       modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
     const sharedModelConnection=sharedConnectionDefault(old);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
+      parallelAnswer:old.parallelAnswer===true,
+      parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
       targetRole:typeof old.targetRole === "string" ? old.targetRole.slice(0,120) :
         (typeof previousPractice.role === "string" ? previousPractice.role.slice(0,120) : ""),
       focusTopics:typeof old.focusTopics === "string" ? old.focusTopics.slice(0,300) :
@@ -325,6 +329,9 @@ function Main() {
   const [download, setDownload] = useState("");
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [decisionMs, setDecisionMs] = useState<number | null>(null);
+  const [answerSource, setAnswerSource] = useState<AnswerSource|null>(null);
+  const [apiPending, setApiPending] = useState(false);
+  const [parallelModels, setParallelModels] = useState<string[]>([]);
   const [answerMs, setAnswerMs] = useState<number | null>(null);
   const [visibleMs, setVisibleMs] = useState<number | null>(null);
   const [completeMs, setCompleteMs] = useState<number | null>(null);
@@ -353,7 +360,7 @@ function Main() {
   const lockedRef = useRef(false);
   const pendingHintRef = useRef("");
   const pendingDisplayRef = useRef<{question:string;terms:string[];keyTerms:string[];hint:string;
-    requestId:string;startedAt:number;asrAt:number|null}|null>(null);
+    requestId:string;startedAt:number;asrAt:number|null;source:AnswerSource}|null>(null);
   const micLastActiveRef = useRef(0);
   const decisionBusyRef = useRef(false);
   const decisionPendingRef = useRef<{text:string;sourceId:string;isFinal:boolean;version:number;receivedAt:number}|null>(null);
@@ -364,11 +371,12 @@ function Main() {
   const lastDecisionAtRef = useRef(0);
   const answerRequestRef = useRef("");
   const answerStartedRef = useRef(0);
-  const answerTextRef = useRef("");
+  const answerRaceRef = useRef<AnswerRace|null>(null);
+  const questionHistoryRef = useRef<string[]>([]);
   const visibleAnswerRequestRef = useRef("");
   const detailRequestRef = useRef("");
   const answerDisplayRef = useRef<{question:string;terms:string[];keyTerms:string[];
-    transition:"first"|"new"|"revision";lastShown:string;requestId:string;startedAt:number;asrAt:number|null}|null>(null);
+    transition:"first"|"new"|"revision";lastShown:string;requestId:string;startedAt:number;asrAt:number|null;source:AnswerSource}|null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const followTranscriptRef = useRef(true);
   const profileWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -865,45 +873,85 @@ function Main() {
     display.lastShown=value;
     if (lockedRef.current && display.asrAt !== null) {
       pendingDisplayRef.current={question:display.question,terms:display.terms,keyTerms:display.keyTerms,
-        hint:value,requestId:display.requestId,startedAt:display.startedAt,asrAt:display.asrAt};
+        hint:value,requestId:display.requestId,startedAt:display.startedAt,asrAt:display.asrAt,source:display.source};
       return;
     }
     setQuestion(display.question);setUncertainTerms(display.terms);setKeyTerms(display.keyTerms);
+    setAnswerSource(display.source);
     publishHint(value);
     markVisible(display.requestId,display.startedAt,display.asrAt);
   }, [publishHint,markVisible]);
+  const cancelAnswer = useCallback(() => {
+    for(const branch of answerRaceRef.current?.branches || []) {
+      if(!branch.done)void invoke("mvp_cancel_answer",{requestId:branch.id}).catch(()=>{});
+    }
+    answerRaceRef.current=null;answerRequestRef.current="";setApiPending(false);
+  }, []);
+
+  const finishAnswer = useCallback((id:string,error?:string) => {
+    const race=answerRaceRef.current;
+    if(!race || !race.finish(id,error,Math.round(performance.now()-answerStartedRef.current)))return;
+    const branch=race.branches.find(item=>item.id===id)!;
+    const elapsed=Math.round(performance.now()-answerStartedRef.current);
+    logDiagnostic(branch.error ? "回答分路失败" : "回答分路完成",
+      `${branch.source=== "local" ? "本地" : "API"} · ${elapsed} ms${branch.error ? ` · ${branch.error}` : ""}`);
+    const display=answerDisplayRef.current;
+    const snapshot=race.snapshot;
+    if(display && snapshot){
+      display.source=snapshot.source;setAnswerMs(snapshot.firstMs);
+      showAnswerSnapshot(display,snapshot.text);
+      if(snapshot.complete){
+        setCompleteMs(snapshot.completeMs);
+        if(display.asrAt!==null)setTranscriptToCompleteMs(Math.round(display.startedAt+(snapshot.completeMs || 0)-display.asrAt));
+      }
+    }
+    setApiPending(race.pendingApi);
+    if(race.finished){
+      answerRequestRef.current="";answerDisplayRef.current=null;
+      setStatus(race.failure ? "error" : runningRef.current ? "listening" : "idle");
+      if(race.failure)setError(race.failure);
+      logDiagnostic("回答完成",`${elapsed} ms${display?.asrAt!=null ? ` · 转录→完整 ${Math.round(performance.now()-display.asrAt)} ms` : ""}`);
+    }
+  }, [showAnswerSnapshot,logDiagnostic]);
+
   const startAnswer = useCallback(async (nextQuestion: string, focus: string[], keyTerms: string[],
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
-    if (answerRequestRef.current) void invoke("mvp_cancel_answer", {requestId:answerRequestRef.current});
-    const requestId = crypto.randomUUID(); answerRequestRef.current = requestId;
-    answerTextRef.current = ""; answerStartedRef.current = performance.now();
+    cancelAnswer();
+    const settings=settingsRef.current;
+    const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
+    const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
+    const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
+    const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
+      source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
+    const race=new AnswerRace(requests);answerRaceRef.current=race;
+    answerStartedRef.current=performance.now();setAnswerSource(null);setApiPending(parallel);
     setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
-    pendingDisplayRef.current = null;pendingHintRef.current="";
-    answerDisplayRef.current = {question:nextQuestion,terms,keyTerms,transition,lastShown:"",requestId,
-      startedAt:answerStartedRef.current,asrAt};
-    questionRef.current = nextQuestion; uncertainRef.current = terms;
-    answerTaskRef.current = JSON.stringify([nextQuestion,focus,keyTerms,constraints,terms]);
-    if (!visibleHintRef.current) {setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);}
+    pendingDisplayRef.current=null;pendingHintRef.current="";
+    answerDisplayRef.current={question:nextQuestion,terms,keyTerms,transition,lastShown:"",requestId,
+      startedAt:answerStartedRef.current,asrAt,source:requests[0].source};
+    const context=rememberQuestion(questionHistoryRef.current,nextQuestion);
+    questionHistoryRef.current=context.history;
+    questionRef.current=nextQuestion;uncertainRef.current=terms;
+    answerTaskRef.current=JSON.stringify([nextQuestion,focus,keyTerms,constraints,terms]);
+    if(!visibleHintRef.current){setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);}
     setStatus("generating");
-    try {
-      if (settingsRef.current.answer.api === "ollama" && !runningRef.current) {
-        await invoke("start_local_service",{service:"ollama"});
-        if (answerRequestRef.current !== requestId) return;
-      }
-      const background=topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
-        settingsRef.current.answer.api==="ollama");
-      await invoke("mvp_answer", {endpoint:endpoint(settingsRef.current.answer,"answer"),
-        requestId, question:nextQuestion, focus, keyTerms, constraints, uncertainTerms:terms,
-        answerInstructions:[settingsRef.current.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
-    } catch (cause) { if (answerRequestRef.current === requestId) {
-      const display=answerDisplayRef.current;
-      if(display && answerTextRef.current.trim())showAnswerSnapshot(display,answerTextRef.current.trim());
-      answerRequestRef.current="";answerDisplayRef.current=null;
-      setStatus("error");setError(`回答生成失败：${String(cause)}`);
-      logDiagnostic("回答生成失败",String(cause));
-    } }
-  }, [showAnswerSnapshot,logDiagnostic]);
+    await Promise.all(configs.map(async(config,index)=>{
+      const id=requests[index].id;
+      try{
+        if(config.api==="ollama" && (!runningRef.current || parallel)){
+          const serviceStarted=performance.now();
+          await invoke("start_local_service",{service:"ollama"});
+          logDiagnostic("本地服务就绪",`${Math.round(performance.now()-serviceStarted)} ms`);
+        }
+        if(answerRaceRef.current!==race)return;
+        const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
+        await invoke("mvp_answer",{endpoint:endpoint(config,"answer"),requestId:id,
+          question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
+          answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
+      }catch(cause){if(answerRaceRef.current===race)finishAnswer(id,String(cause));}
+    }));
+  }, [cancelAnswer,finishAnswer,logDiagnostic]);
 
   const submitEditedQuestion = useCallback(() => {
     const corrected=questionDraft.trim();
@@ -1050,7 +1098,7 @@ function Main() {
             if (!speaking && pendingDisplayRef.current) {
               const display=pendingDisplayRef.current;pendingDisplayRef.current=null;
               setQuestion(display.question);setUncertainTerms(display.terms);setKeyTerms(display.keyTerms);
-              publishHint(display.hint);
+              setAnswerSource(display.source);publishHint(display.hint);
               markVisible(display.requestId,display.startedAt,display.asrAt);
             } else if (!speaking && pendingHintRef.current) {
               setHint(pendingHintRef.current);pendingHintRef.current="";
@@ -1058,44 +1106,28 @@ function Main() {
           }
         }
       }));
+      stops.push(await listen<{requestId:string;phase:string;elapsedMs:number;duration?:boolean}>("mvp_answer_phase", event => {
+        const branch=answerRaceRef.current?.branches.find(item=>item.id===event.payload.requestId);
+        if(!branch)return;
+        logDiagnostic("回答阶段",`${branch.source=== "local" ? "本地" : "API"} · ${event.payload.phase} · ${Math.round(event.payload.elapsedMs)} ms${event.payload.duration ? "（阶段耗时）" : "（请求后）"}`);
+      }));
       stops.push(await listen<{requestId:string;token:string}>("mvp_answer_token", event => {
-        if (event.payload.requestId !== answerRequestRef.current) return;
-        if (!answerTextRef.current) {
-          const elapsed=Math.round(performance.now()-answerStartedRef.current);
-          setAnswerMs(elapsed);logDiagnostic("首条回答",`${elapsed} ms`);
-        }
-        answerTextRef.current += event.payload.token;
-        const display=answerDisplayRef.current;
-        if (display && display.transition !== "revision") {
-          const preview=readablePreview(answerTextRef.current);
-          if (preview) showAnswerSnapshot(display,preview);
+        const race=answerRaceRef.current;
+        if(!race)return;
+        const branch=race.branches.find(item=>item.id===event.payload.requestId);
+        if(!branch)return;
+        const first=branch.firstMs===null;
+        const elapsed=Math.round(performance.now()-answerStartedRef.current);
+        if(!race.token(branch.id,event.payload.token,elapsed))return;
+        if(first)logDiagnostic("模型首字",`${branch.source=== "local" ? "本地" : "API"} · ${elapsed} ms`);
+        const display=answerDisplayRef.current;const snapshot=race.snapshot;
+        if(display && snapshot){
+          display.source=snapshot.source;setAnswerMs(snapshot.firstMs);
+          showAnswerSnapshot(display,snapshot.text);
         }
       }));
       stops.push(await listen<{requestId:string;error?:string}>("mvp_answer_done", event => {
-        if (event.payload.requestId !== answerRequestRef.current) return;
-        const finishedAt=performance.now();
-        const display=answerDisplayRef.current;
-        answerRequestRef.current = "";
-        if (event.payload.error) {
-          if(display && answerTextRef.current.trim())showAnswerSnapshot(display,answerTextRef.current.trim());
-          setStatus("error");setError(event.payload.error);logDiagnostic("回答生成失败",event.payload.error);
-        }
-        else if (!answerTextRef.current.trim()) {
-          setStatus("error");setError("回答接口没有返回可显示的内容");logDiagnostic("回答为空");
-        }
-        else {
-          const complete=Math.round(finishedAt-answerStartedRef.current);
-          setCompleteMs(complete);
-          if (display?.asrAt !== null && display?.asrAt !== undefined) {
-            const fromTranscript=Math.round(finishedAt-display.asrAt);
-            setTranscriptToCompleteMs(fromTranscript);
-            logDiagnostic("回答完整生成",`生成 ${complete} ms · 相关转录更新后 ${fromTranscript} ms`);
-          } else logDiagnostic("手动修正回答完成",`${complete} ms`);
-          if (display) showAnswerSnapshot(display,answerTextRef.current.trim());
-          setStatus(runningRef.current ? "listening" : "idle");
-          logDiagnostic("回答完成");
-        }
-        answerDisplayRef.current = null;
+        finishAnswer(event.payload.requestId,event.payload.error);
       }));
       stops.push(await listen("mvp_detail_request", () => {void loadDetail();}));
       stops.push(await listen<{engine:string;model_id:string;percent:number;status:string}>("model_download_progress", event => {
@@ -1115,7 +1147,7 @@ function Main() {
     };
     void register();
     return () => {active=false;stops.forEach(stop=>stop());};
-  }, [queueDecision,publishHint,refreshEngines,logDiagnostic,markVisible,showAnswerSnapshot,loadDetail]);
+  }, [queueDecision,publishHint,refreshEngines,logDiagnostic,markVisible,showAnswerSnapshot,finishAnswer,loadDetail]);
 
   const chosenEngine = engines.find(item => item.engine === settings.sttEngine);
   const chosenModel = chosenEngine?.models.find(item => item.id === settings.sttModel);
@@ -1147,10 +1179,7 @@ function Main() {
       } finally {setStartingService(false);}
     }
     try {
-      if (answerRequestRef.current) {
-        void invoke("mvp_cancel_answer",{requestId:answerRequestRef.current});
-        answerRequestRef.current="";answerDisplayRef.current=null;
-      }
+      cancelAnswer();answerDisplayRef.current=null;questionHistoryRef.current=[];
       await invoke("set_stt_language",{language:"zh-CN"});
       const topic = settings.domain === "ai" ? "中文技术面试，人工智能与机器学习，英文技术缩写保持原文。" :
         settings.domain === "communication" ? "中文技术面试，通信和计算机网络，英文技术缩写保持原文。" :
@@ -1191,8 +1220,7 @@ function Main() {
     sessionEpochRef.current++;runningRef.current=false;setRunning(false);setStatus("idle");decisionVersionRef.current++;
     decisionPendingRef.current=null;
     if (decisionTimerRef.current) clearTimeout(decisionTimerRef.current);
-    if (answerRequestRef.current) void invoke("mvp_cancel_answer",{requestId:answerRequestRef.current});
-    answerRequestRef.current="";answerDisplayRef.current=null;pendingDisplayRef.current=null;
+    cancelAnswer();answerDisplayRef.current=null;pendingDisplayRef.current=null;
     detailRequestRef.current="";setDetailLoading(false);
     logDiagnostic("结束聆听");
     try {await invoke("stop_capture");} catch (cause) {setError(`停止采集失败：${String(cause)}`);}
@@ -1377,10 +1405,10 @@ function Main() {
               value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
               onKeyDown={event=>{
                 if (event.key==="Escape") {event.preventDefault();setEditingQuestion(false);}
-                else if (event.key==="Enter" && (event.ctrlKey || event.metaKey)) {
+                else if (event.key==="Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode!==229) {
                   event.preventDefault();submitEditedQuestion();
                 }
-              }}/><div className="question-editor-actions"><span>{running ? "修正后重新生成提示" : "直接测试回答，无需开始聆听"} · Ctrl+Enter 提交</span>
+              }}/><div className="question-editor-actions"><span>{running ? "修正后重新生成提示" : "直接测试回答，无需开始聆听"} · Enter 提交，Shift+Enter 换行</span>
               <button onClick={()=>setEditingQuestion(false)}>取消</button>
               <button className="primary" disabled={!questionDraft.trim()} onClick={submitEditedQuestion}>{question ? "保存并重新回答" : "生成回答"}</button></div></div>
             : <button type="button" className={question?"question-box editable active":"question-box editable"} aria-label="编辑问题" title="点击编辑问题"
@@ -1394,9 +1422,9 @@ function Main() {
             setShowDetail(!showDetail);
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
           {showDetail && hint && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
-            <div className="detail-timings">判别 {decisionMs??"—"} ms · API 首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
+            <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           {error && <div className="error-box">{error}</div>}</div>
-        <div className="answer-footer"><span><Check size={14}/> {settings.answer.api === "ollama" ? "本地回答" : "API 回答"}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
+        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
       </section>
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
@@ -1512,7 +1540,23 @@ function Main() {
             : "分别配置不同服务或模型。已有配置已保留；开启共用后采用回答生成的连接，关闭后恢复原判别配置。"}</p></div>
         {!settings.sharedModelConnection && stageEditor("decision","语义判别",decisionChoices,decisionReady)}
         {stageEditor("answer",settings.sharedModelConnection ? "共用模型连接" : "回答生成",answerChoices,answerReady)}
-        {(settings.decision.api === "ollama" || settings.answer.api === "ollama") && <div className="setting-group ollama-setup">
+        <div className="setting-group"><div className="setting-heading"><Sparkles size={18}/> 回答并行</div>
+          <label className="connection-sharing"><input type="checkbox" checked={settings.parallelAnswer}
+            disabled={running || practiceActive} onChange={e=>update({parallelAnswer:e.target.checked})}/>
+            <span>本地与 API 同时生成实时回答</span></label>
+          <p className="setting-help">先显示较快的一路，两路结束后用完整成功的 API 回答替换。本地结果仅供临时参考；并行会增加本机负载及 API 用量。出题和评分仍使用共用或判别连接。API 不会自动收到简历内容。</p>
+          {settings.parallelAnswer && <>
+            {settings.answer.api === "ollama" && <p className="setting-help" role="alert">请将上方回答连接设置为 API；当前仍只调用本地模型。</p>}
+            <label>并行本地模型<input list="parallel-local-models" value={settings.parallelLocal.model}
+              disabled={running || practiceActive} onChange={e=>update({parallelLocal:{...settings.parallelLocal,model:e.target.value}})}/>
+              <datalist id="parallel-local-models">{parallelModels.map(model=><option key={model} value={model}/>)}</datalist></label>
+            <button disabled={running || practiceActive} onClick={()=>void invoke<string[]>("mvp_list_models",{endpoint:endpoint(settings.parallelLocal,"answer")})
+              .then(setParallelModels).catch(cause=>setError(`获取本地模型失败：${String(cause)}`))}>检测本地模型</button>
+            <label>本地 Ollama 地址<input value={settings.parallelLocal.baseUrl} disabled={running || practiceActive}
+              onChange={e=>update({parallelLocal:{...settings.parallelLocal,baseUrl:e.target.value}})}/></label>
+          </>}
+        </div>
+        {(settings.decision.api === "ollama" || settings.answer.api === "ollama" || settings.parallelAnswer) && <div className="setting-group ollama-setup">
           <div className="setting-heading"><Sparkles size={18}/> 本地 Ollama
             <button className="text-link" onClick={()=>void refreshOllamaRuntime()} disabled={ollamaChecking}>{ollamaChecking?"检测中…":"重新检测"}</button></div>
           <p className="setting-help">选择本地模式需要先安装 Ollama，并下载至少一个本地大模型。首次下载需要联网；之后可在本机运行。</p>

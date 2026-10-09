@@ -232,7 +232,7 @@ async fn chat(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &st
 pub async fn mvp_decide(app: AppHandle, endpoint: ModelEndpoint, input: DecisionInput) -> Result<Decision, String> {
     let system = "你是中文技术面试的实时任务提取器。根据最新语音转录及上下文，判断此刻是否值得给候选人显示技术回答提示。输出单个 JSON 对象。不要根据疑问词、标点或停顿作决定，只看语义。\n\
 需要提示的任务包括解释概念、介绍技术、比较方案、说明为何选择 A 而不选择 B、分析优劣或解决问题；祈使句也可能是任务。focus 提取必须回答的技术要点，key_terms 提取最多三个值得解释的技术术语（保留原文拼写，不要把普通词凑进去），constraints 提取明确条件。question 只写可以用通用技术知识解释的任务，不补造条件。\n\
-面试助手只补充技术原理。纯粹询问家乡、年龄、个人经历或某个项目实际做过什么时，intent=personal、action=wait；如果同一句还涉及明确技术概念，则只提取其中可解释的技术部分并 show，不推断项目事实。例如“固件怎样更新，是否用了 Bootloader”提取“固件更新流程与 Bootloader 的工作原理是什么”，key_terms 包含 Bootloader，不回答个人项目是否使用。普通陈述或面试官自己的回答也 wait；任务尚未明确时 intent=incomplete，action=wait；新任务 show；新增技术约束或追问 revise；重复而无新信息 keep。同一任务的 question、focus、key_terms、constraints 用稳定措辞与顺序；只判断最新转录，前文旧题不可重新触发。ASR 增量修正错字或换一种说法时，若技术任务未变，relation=repeat、action=keep。只有新信息改变必须回答的内容时才 revise。转录标为稳定只表示识别器结束一个音频片段，不代表问题结束。\n\
+面试助手只补充技术原理。纯粹询问家乡、年龄、个人经历或某个项目实际做过什么时，intent=personal、action=wait；如果同一句还涉及明确技术概念，则只提取其中可解释的技术部分并 show，不推断项目事实。例如“固件怎样更新，是否用了 Bootloader”提取“固件更新流程与 Bootloader 的工作原理是什么”，key_terms 包含 Bootloader，不回答个人项目是否使用。普通陈述或面试官自己的回答也 wait；任务尚未明确时 intent=incomplete，action=wait；新任务 show；新增技术约束或追问 revise；追问省略主体时，用上一问题中明确的主体补全 question，例如上一题“PPO 是什么”、最新“什么情况下使用”应提取“PPO 在什么情况下使用”，relation=follow_up。最新明确换题时采用新主体，不沿用旧题；无法确定指代时 wait，不猜测。重复而无新信息 keep。同一任务的 question、focus、key_terms、constraints 用稳定措辞与顺序；只判断最新转录，前文旧题不可重新触发。ASR 增量修正错字或换一种说法时，若技术任务未变，relation=repeat、action=keep。只有新信息改变必须回答的内容时才 revise。转录标为稳定只表示识别器结束一个音频片段，不代表问题结束。\n\
 ASR 可能听错技术术语。只有从上下文有充分把握时才能规范写法；不能确定的词放入 uncertain_terms，不可凭常见题型猜定。若歧义影响整个任务，intent=uncertain 且 wait；若其余内容仍足够作答，可 show 并保留 uncertain_terms。视频测试中同一音轨可能包含双方讲话，结合对话判断是否正在向候选人布置任务。
 必须只返回以下字段的 JSON，不加 Markdown：intent（statement/incomplete/question/uncertain/personal），relation（new/follow_up/repeat/none），action（wait/show/revise/keep），question（字符串），focus（字符串数组），key_terms（字符串数组），constraints（字符串数组），uncertain_terms（字符串数组）。没有内容的数组返回 []，没有可回答技术任务时 question 返回空字符串。";
     let user = format!("场景：{}\n术语背景（仅用于消歧，不能补造转录内容或个人事实）：{}\n前文：{}\n上一问题：{}\n当前显示：{}\n转录状态：{}\n最新转录：{}",
@@ -301,7 +301,7 @@ fn answer_system(base: &str, instructions: Option<&str>) -> String {
 
 #[command]
 pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: String,
-    question: String, focus: Vec<String>, key_terms: Option<Vec<String>>, constraints: Vec<String>,
+    question: String, question_context: Option<Vec<String>>, focus: Vec<String>, key_terms: Option<Vec<String>>, constraints: Vec<String>,
     uncertain_terms: Vec<String>, answer_instructions: Option<String>, practice_reference: Option<bool>,
     practice_context: Option<PracticeContext>) -> Result<(), String> {
     if question.trim().is_empty() { return Err("没有可回答的问题".into()); }
@@ -310,6 +310,12 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     let url = endpoint_url(&endpoint, "chat")?;
     let system = answer_system("你是中文技术面试知识提示助手。英文术语首次出现时给中文含义，能确认的缩写先给英文全称及中文含义。概念题用‘定义：’和‘原理：’两段，每段一到两句；原理说明输入或触发、关键处理步骤和结果。比较题用‘结论：’和‘依据：’，其他任务用‘要点：’和‘原因：’。优先讲实际机制，避免空泛作用。不要 Markdown、寒暄或重复问题。", answer_instructions.as_deref());
     let user = format!("技术回答任务：{}\n必须覆盖：{}\n需解释的术语：{}\n明确条件：{}\n听写不确定术语：{}", question.chars().take(600).collect::<String>(), focus.join("；"), key_terms.iter().take(3).cloned().collect::<Vec<_>>().join("、"), constraints.join("；"), uncertain_terms.join("、"));
+    let previous = question_context.unwrap_or_default().into_iter().rev().take(3)
+        .map(|text| text.chars().take(600).collect::<String>()).collect::<Vec<_>>()
+        .into_iter().rev().collect::<Vec<_>>().join("\n");
+    let user = if previous.is_empty() { user } else {
+        format!("之前的问题（仅用于理解当前追问的指代；新主体优先，不能据此编造个人经历或把旧题重新作答）：\n{previous}\n当前最新任务：\n{user}")
+    };
     let user = if let Some(context) = &practice_context {
         format!("{}\n{}", context.background(), user)
     } else { user };
@@ -334,8 +340,11 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     flags().lock().map_err(|e| e.to_string())?.insert(request_id.clone(), flag.clone());
     let result = async {
         let key = credential(&app, &endpoint)?;
+        let started = std::time::Instant::now();
         let response = authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref()).send().await.map_err(|e| e.to_string())?
             .error_for_status().map_err(|e| e.to_string())?;
+        let _ = app.emit("mvp_answer_phase", serde_json::json!({"requestId":request_id,
+            "phase":"响应就绪", "elapsedMs":started.elapsed().as_millis()}));
         let mut stream = response.bytes_stream();
         let mut decoder = AnswerStream::new(endpoint.api == "ollama");
         let mut received_chars = 0;
@@ -353,6 +362,10 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
                 received_chars += token.chars().count();
                 let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
             }
+        }
+        for (phase, elapsed_ms) in decoder.timings() {
+            let _ = app.emit("mvp_answer_phase", serde_json::json!({"requestId":request_id,
+                "phase":phase, "elapsedMs":elapsed_ms, "duration":true}));
         }
         let outcome = decoder.outcome();
         log::info!("Answer stream: budget={token_limit}, received_chars={received_chars}, outcome={:?}", outcome);

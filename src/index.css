@@ -241,3 +241,6 @@ html,body,#root{background:transparent!important}
   .workspace .transcript-scroll{min-height:0;overflow-y:auto;flex:1 1 auto}
   .workspace .empty-state{height:auto;min-height:180px;padding:20px 0}
 }
+
+/* Ordinary content and controls keep an arrow; native resize corners retain direction cues. */
+.app-shell, .app-shell *:not(.resize-corner), .floating-shell, .floating-shell *:not(.resize-corner){cursor:default!important}

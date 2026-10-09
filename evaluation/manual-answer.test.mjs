@@ -33,7 +33,7 @@ test("idle question editing calls only the selected answer model without ASR or 
       await page.getByRole('button',{name:'生成回答',exact:true}).click();
       await page.locator('.answer-text .katex').waitFor();
       assert.equal(await page.getByRole('button',{name:'开始聆听',exact:true}).count(),1);
-      await edit.click();await input.fill('解释一下缩放因子');await input.press('Control+Enter');
+      await edit.click();await input.fill('解释一下缩放因子');await input.press('Enter');
       await page.waitForFunction(()=>window.calls.filter(item=>item.command==='mvp_answer').length===2);
       await page.locator('.answer-text .katex').waitFor();
       const calls=await page.evaluate(()=>window.calls);
@@ -41,6 +41,7 @@ test("idle question editing calls only the selected answer model without ASR or 
       const answers=calls.filter(item=>item.command==='mvp_answer');
       assert.equal(answers[0].args.question,'请写出注意力计算公式');
       assert.equal(answers[1].args.question,'解释一下缩放因子');
+      assert.deepEqual(answers[1].args.questionContext,['请写出注意力计算公式']);
       assert.equal(answers[0].args.endpoint.model,'answer-fixture');
       assert.equal(answers[0].args.endpoint.api,local?'ollama':'openai');
       assert.equal(calls.some(item=>item.command==='start_local_service'),local);

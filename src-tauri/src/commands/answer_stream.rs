@@ -13,11 +13,12 @@ pub(super) struct AnswerStream {
     pending: Vec<u8>,
     ended: bool,
     error: Option<&'static str>,
+    timings: Vec<(&'static str, u64)>,
 }
 
 impl AnswerStream {
     pub fn new(ollama: bool) -> Self {
-        Self { ollama, pending: Vec::new(), ended: false, error: None }
+        Self { ollama, pending: Vec::new(), ended: false, error: None, timings: Vec::new() }
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
@@ -38,6 +39,8 @@ impl AnswerStream {
     }
 
     pub fn is_finished(&self) -> bool { self.ended }
+
+    pub fn timings(&self) -> &[(&'static str, u64)] { &self.timings }
 
     pub fn outcome(&self) -> Result<(), String> {
         if let Some(error) = self.error { return Err(error.into()); }
@@ -68,7 +71,12 @@ impl AnswerStream {
             else { value["choices"][0]["delta"]["content"].as_str() };
         if let Some(token) = token.filter(|token| !token.is_empty()) { tokens.push(token.into()); }
         let reason = if self.ollama {
-            if value["done"].as_bool() == Some(true) { self.ended = true; }
+            if value["done"].as_bool() == Some(true) {
+                self.ended = true;
+                for (field, name) in [("load_duration", "模型加载"), ("prompt_eval_duration", "提示处理"), ("eval_duration", "生成计算")] {
+                    if let Some(ns) = value[field].as_u64() { self.timings.push((name, ns / 1_000_000)); }
+                }
+            }
             value["done_reason"].as_str()
         } else { value["choices"][0]["finish_reason"].as_str() };
         if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
@@ -110,6 +118,14 @@ mod tests {
         let mut complete = AnswerStream::new(true);
         complete.push(b"{\"message\":{\"content\":\"done\"},\"done\":true,\"done_reason\":\"stop\"}\n");
         assert!(complete.outcome().is_ok());
+    }
+
+    #[test]
+    fn local_timing_metadata_is_kept_separate_from_text() {
+        let mut stream = AnswerStream::new(true);
+        let tokens = stream.push(b"{\"message\":{\"content\":\"answer\"},\"done\":true,\"load_duration\":1200000000,\"prompt_eval_duration\":300000000,\"eval_duration\":900000000}\n");
+        assert_eq!(tokens.concat(), "answer");
+        assert_eq!(stream.timings(), &[("模型加载", 1200), ("提示处理", 300), ("生成计算", 900)]);
     }
 
     #[test]
