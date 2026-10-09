@@ -859,6 +859,10 @@ pub async fn start_capture_per_party(
     let system_device = them.device_id.clone();
     let system_is_input = them.is_input_device;
 
+    // Validate provider/model configuration before opening any hardware stream.
+    let you_stt = create_stt_provider_for_party(&you, &state, &app, "You").await?;
+    let them_stt = create_stt_provider_for_party(&them, &state, &app, "Them").await?;
+
     // ── IPolicyConfig: override system default mic BEFORE starting capture ──
     // Web Speech and Windows Speech always use the OS default recording device.
     // The override must happen before capture starts so that Web Speech API
@@ -992,7 +996,7 @@ pub async fn start_capture_per_party(
         }));
     }
 
-    {
+    let capture_result = {
         let mut guard = state
             .audio
             .lock()
@@ -1003,14 +1007,12 @@ pub async fn start_capture_per_party(
             mic_device,
             system_device
         );
-        mgr.start_capture(&mic_device, &system_device, system_is_input, tx)?;
+        mgr.start_capture(&mic_device, &system_device, system_is_input, tx)
+    };
+    if let Err(error)=capture_result {
+        restore_default_device_if_overridden(&state,&app);
+        return Err(error);
     }
-
-    // ── Create STT provider for "You" party (if not web_speech) ──
-    let you_stt = create_stt_provider_for_party(&you, &state, &app, "You").await?;
-
-    // ── Create STT provider for "Them" party (if not web_speech) ──
-    let them_stt = create_stt_provider_for_party(&them, &state, &app, "Them").await?;
 
     // Start STT streams
     let (you_stt_tx, mut you_stt_rx) = mpsc::channel::<crate::stt::provider::TranscriptResult>(256);
@@ -1054,7 +1056,9 @@ pub async fn start_capture_per_party(
                         "message": format!("Failed to start STT: {}", e)
                     }),
                 );
-                you_stt_provider = None;
+                let _=provider.stop_stream().await;
+                let _=stop_capture(app.clone()).await;
+                return Err(format!("麦克风转录初始化失败：{e}"));
             }
         }
     }
@@ -1093,7 +1097,10 @@ pub async fn start_capture_per_party(
                         "message": format!("Failed to start STT: {}", e)
                     }),
                 );
-                them_stt_provider = None;
+                let _=provider.stop_stream().await;
+                if let Some(provider)=you_stt_provider.as_mut(){let _=provider.stop_stream().await;}
+                let _=stop_capture(app.clone()).await;
+                return Err(format!("系统音频转录初始化失败：{e}"));
             }
         }
     }

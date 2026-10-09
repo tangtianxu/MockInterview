@@ -426,12 +426,12 @@ pub fn run() {
                 });
             }
 
-            // This focused app has no tray. Closing the main window exits cleanly.
+            // The frontend flushes pending preferences on CloseRequested. If it
+            // has not loaded (or was destroyed), closing still exits the app.
             if let Some(launcher) = app.get_webview_window("launcher") {
                 let close_app = app.handle().clone();
                 launcher.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
                         close_app.exit(0);
                     }
                 });

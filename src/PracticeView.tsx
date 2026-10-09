@@ -61,6 +61,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   const [remaining, setRemaining] = useState(0);
   const [busy, setBusy] = useState<"resume" | "analyze" | "question" | "feedback" | null>(null);
   const [micOn, setMicOn] = useState(false);
+  const [micStarting,setMicStarting]=useState(false);
+  const micStartingRef=useRef(false);
   const [partialSpeech, setPartialSpeech] = useState("");
   const micOnRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn[]>([]);
@@ -71,7 +73,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   useEffect(() => {localStorage.setItem("interviewCue.practiceConfig",JSON.stringify(config));onConfigChange?.();},[config,onConfigChange]);
   useEffect(() => {if(profileEpoch)setConfig(loadConfig());},[profileEpoch]);
   useEffect(() => {onSessionActiveChange?.(active);},[active,onSessionActiveChange]);
-  useEffect(()=>{onWorkActiveChange?.(active || !!busy || micOn || reference.loading);},[active,busy,micOn,reference.loading,onWorkActiveChange]);
+  useEffect(()=>{onWorkActiveChange?.(active || !!busy || micOn || micStarting || reference.loading);},[active,busy,micOn,micStarting,reference.loading,onWorkActiveChange]);
   useEffect(()=>()=>onWorkActiveChange?.(false),[onWorkActiveChange]);
   useEffect(() => {
     const hint=feedback ? reference.text || `参考评分 ${feedback.score}/5。${(feedback.missingPoints || []).slice(0,2).map(item=>item.explanation).join(" ") || (feedback.missing || []).slice(0,2).map(code=>aspects[code]).filter(Boolean).join(" ")}` :
@@ -80,12 +82,10 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   },[question,feedback,reference.text,active,onPreviewChange]);
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => setRemaining(value => {
-      if (value <= 1) {setActive(false); return 0;}
-      return value - 1;
-    }),1000);
+    const timer = window.setInterval(() => setRemaining(value => Math.max(0,value-1)),1000);
     return () => window.clearInterval(timer);
   },[active]);
+  useEffect(()=>{if(active && remaining===0)endSession();},[active,remaining]);
 
   const currentBackground=()=>practiceBackground({scope:config.scope,difficulty:config.difficulty,role,topics,
     domain,local,personalization,resume,analysis});
@@ -100,8 +100,11 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     return agreed;
   };
   const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,unknown> = {}, background=currentBackground()) => {
+    const epoch=sessionEpochRef.current;
     if (local) await invoke("start_local_service",{service:"ollama"});
+    if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     const consentToSendResume=action==="analyze" ? false : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
+    if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     return invoke<Record<string,unknown>>("practice_model",{endpoint:model,input:{
       ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
       consentToSendResume,history:"",askedQuestions:[],question:"",questionKind:"",answer:"",...fields,
@@ -200,7 +203,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   };
   const start = async () => {
     if(updating)return;
-    if(operationRef.current.busy)return;
+    if(operationRef.current.busy || micStartingRef.current)return;
     if (liveRunning) {setError("请先结束实时聆听，再开始模拟练习。");return;}
     if (config.scope !== "technical" && !analysis) {setError("项目、混合或综合练习需要先导入并分析简历。");return;}
     const epoch=++sessionEpochRef.current;cancelReference();turnsRef.current=[];
@@ -209,7 +212,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if(epoch===sessionEpochRef.current){if(started)setActive(true);else setRemaining(0);}
   };
   const submit = async () => {
-    if (!question || !draft.trim() || feedback) return;
+    if (!active || micStartingRef.current || !question || !draft.trim() || feedback) return;
     const token=operationRef.current.begin();
     if(token===null)return;
     const currentQuestion=question;
@@ -239,7 +242,11 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   };
   const startMic = async () => {
     if(updating)return;
-    if (liveRunning || micOnRef.current || !question || feedback) return;
+    if (!active || liveRunning || micOnRef.current || micStartingRef.current || !question || feedback) return;
+    micStartingRef.current=true;setMicStarting(true);
+    const epoch=sessionEpochRef.current;
+    const stillCurrent=()=>epoch===sessionEpochRef.current;
+    let captureStarted=false;
     setError("");seenSegmentsRef.current.clear();setPartialSpeech("");
     try {
       await invoke("set_stt_language",{language:"zh-CN"});
@@ -253,26 +260,33 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       if (stt.mode==="api" && stt.apiProvider==="groq_whisper")
         await invoke("update_groq_config",{configJson:JSON.stringify({model:stt.apiModel || "whisper-large-v3-turbo",
           language:"zh",temperature:0,response_format:"json",timestamp_granularities:[],prompt:topic,segment_duration_secs:3})});
+      if(!stillCurrent())return;
       const you = {role:"You",device_id:stt.mic,is_input_device:true,
         stt_provider:stt.mode==="local" ? stt.engine : stt.apiProvider,
         local_model_id:stt.mode==="local" ? stt.model : null};
       const them = {role:"Them",device_id:stt.output,is_input_device:false,stt_provider:"web_speech",local_model_id:null};
       unlistenRef.current.push(await listen<{segment:{id:string;text:string;speaker:string}}>("transcript_update",event=>{
-        if (event.payload.segment.speaker==="User") setPartialSpeech(event.payload.segment.text);
+        if (stillCurrent() && event.payload.segment.speaker==="User") setPartialSpeech(event.payload.segment.text);
       }));
       unlistenRef.current.push(await listen<{segment:{id:string;text:string;speaker:string}}>("transcript_final",event=>{
         const segment=event.payload.segment;
-        if (segment.speaker!=="User" || seenSegmentsRef.current.has(segment.id)) return;
+        if (!stillCurrent() || segment.speaker!=="User" || seenSegmentsRef.current.has(segment.id)) return;
         seenSegmentsRef.current.add(segment.id);
         setDraft(value=>`${value}${value.trim()?" ":""}${segment.text}`);
         setPartialSpeech("");
       }));
+      if(!stillCurrent())return;
       await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});
+      captureStarted=true;
+      if(!stillCurrent()){await invoke("stop_capture");captureStarted=false;return;}
       micOnRef.current=true;setMicOn(true);
     } catch (cause) {
       for (const stop of unlistenRef.current.splice(0)) stop();
       try {await invoke("stop_capture");} catch { /* Initial capture may not have started. */ }
-      setError(`无法开始语音作答：${String(cause)}`);
+      if(stillCurrent())setError(`无法开始语音作答：${String(cause)}`);
+    } finally {
+      if(!captureStarted)for(const stop of unlistenRef.current.splice(0))stop();
+      micStartingRef.current=false;setMicStarting(false);
     }
   };
   useEffect(() => () => {
@@ -291,15 +305,15 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <h1>练习表达，<br/>看清薄弱点。</h1><p>模型担任模拟面试官。你作答后，它给出参考反馈与下一题。</p></div>
       <div className="practice-options">
         <h2>练习设置</h2>
-        <label>时长<select value={config.minutes} disabled={active} onChange={event=>setConfig(value=>({...value,minutes:Number(event.target.value)}))}>
+        <label>时长<select value={config.minutes} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,minutes:Number(event.target.value)}))}>
           {[10,20,30,45,60].map(value=><option key={value} value={value}>{value} 分钟</option>)}</select></label>
-        <label>覆盖范围<select value={config.scope} disabled={active} onChange={event=>setConfig(value=>({...value,scope:event.target.value as PracticeConfig["scope"]}))}>
+        <label>覆盖范围<select value={config.scope} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,scope:event.target.value as PracticeConfig["scope"]}))}>
           <option value="technical">技术基础</option><option value="project">简历项目</option>
           <option value="mixed">技术＋项目</option><option value="comprehensive">综合</option></select></label>
-        <label>难度<select value={config.difficulty} disabled={active} onChange={event=>setConfig(value=>({...value,difficulty:event.target.value as PracticeConfig["difficulty"]}))}>
+        <label>难度<select value={config.difficulty} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,difficulty:event.target.value as PracticeConfig["difficulty"]}))}>
           <option value="basic">基础</option><option value="medium">中等</option><option value="advanced">进阶</option></select></label>
-        <label>目标岗位（可选）<input value={role} disabled={active} maxLength={120} placeholder="如：算法工程师" onChange={event=>onRoleChange(event.target.value)}/></label>
-        <label>关注主题（可选）<input value={topics} disabled={active} maxLength={300} placeholder="如：RAG、通信协议" onChange={event=>onTopicsChange(event.target.value)}/></label>
+        <label>目标岗位（可选）<input value={role} disabled={active || !!busy || micStarting || updating} maxLength={120} placeholder="如：算法工程师" onChange={event=>onRoleChange(event.target.value)}/></label>
+        <label>关注主题（可选）<input value={topics} disabled={active || !!busy || micStarting || updating} maxLength={300} placeholder="如：RAG、通信协议" onChange={event=>onTopicsChange(event.target.value)}/></label>
         <p>岗位和主题与实时提示页共用，只调整选题与术语背景，不作为经历事实。</p>
       </div>
       <div className="practice-options">
@@ -313,7 +327,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           <Sparkles size={16}/> {busy === "analyze" ? "正在分析…" : "分析简历"}</button>}
         {resume && !local && <p className="practice-warning">分析简历需先用本地 Ollama；已有本地分析可继续用 API 练习项目题，每次发送摘录前单独确认。</p>}
         {!local && <p>技术题练习会把问题与回答发送给所选回答 API；简历内容不会发送。</p>}
-        {local && personalization && <p>已沿用模型设置中的个性化回答偏好调整选题；这段偏好不作为简历事实。</p>}
+        {local && personalization && <p>已沿用个人资料中的个性化回答偏好调整选题；这段偏好不作为简历事实。</p>}
         {analysis && <div className="practice-analysis"><strong>简历分析</strong><p>{analysis.summary}</p>
           {!!analysis.suggestedTopics?.length && <small>建议覆盖：{analysis.suggestedTopics.join("、")}</small>}</div>}
       </div>
@@ -321,7 +335,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     <section className="practice-dialogue">
       <div className="panel-header"><div><span className="panel-kicker">模拟现场</span><h2>模拟面试</h2></div><span className="panel-count"><Clock3 size={15}/> {minutesLabel(remaining)}</span></div>
       <div className="practice-controls">
-        {!active && <button className="start-btn" disabled={updating || !!busy} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
+        {!active && <button className="start-btn" disabled={updating || !!busy || micStarting} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
         {active && <button className="stop-btn" onClick={endSession}><Square size={14}/> 结束练习</button>}
         <span>{turns.length} 题已答 · 平均 {average}/5</span>
       </div>
@@ -340,9 +354,9 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <textarea id="practice-answer" value={draft} onChange={event=>setDraft(event.target.value)} rows={5} maxLength={2500}
           placeholder="写下刚才实际说出的内容，再获取反馈。"/>
         {partialSpeech && <div className="practice-partial">正在识别：{partialSpeech}</div>}
-        <div className="practice-compose-actions"><button className="practice-secondary" disabled={!!busy || !active} onClick={()=>void (micOn ? stopMic() : startMic())}>
-          {micOn ? "停止麦克风" : "麦克风作答"}</button>
-        <button className="start-btn" disabled={!draft.trim() || !!busy || micOn} onClick={()=>void submit()}><Send size={15}/> {busy === "feedback" ? "正在评估…" : micOn ? "先停麦克风" : "提交回答"}</button></div></div>}
+        <div className="practice-compose-actions"><button className="practice-secondary" disabled={!!busy || micStarting || !active} onClick={()=>void (micOn ? stopMic() : startMic())}>
+          {micStarting ? "正在启动麦克风…" : micOn ? "停止麦克风" : "麦克风作答"}</button>
+        <button className="start-btn" disabled={!draft.trim() || !!busy || micOn || micStarting} onClick={()=>void submit()}><Send size={15}/> {busy === "feedback" ? "正在评估…" : micOn ? "先停麦克风" : "提交回答"}</button></div></div>}
       {question && !feedback && stt.mode==="api" && <div className="practice-api-note">麦克风作答会按模型设置，将语音发送给所选识别服务。</div>}
       {error && <div className="error-box" role="alert">{error}</div>}
     </section>

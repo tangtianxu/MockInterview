@@ -8,6 +8,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from verify_portable_runtime import verify_portable
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'tangtianxu/MockInterview'
@@ -38,6 +39,7 @@ def main():
         raise SystemExit('Synchronize versions and enable signed updater artifacts first')
     tag = f'v{version}'
     installer = args.installer or ROOT / f'src-tauri/target/release/bundle/nsis/MockInterview_{version}_x64-setup.exe'
+    verify_portable(installer.parents[2] / 'interview-cue.exe')
     notes = args.notes_file.read_text(encoding='utf-8').strip() if args.notes_file else ''
     if not notes and not args.dry_run:
         raise SystemExit('Publish requires --notes-file containing release notes')

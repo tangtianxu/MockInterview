@@ -4,11 +4,11 @@
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock}, time::Duration};
+use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tauri::{command, AppHandle, Emitter, Manager};
 use crate::state::AppState;
 use super::practice_protocol::{safe_feedback, repeated_question, duplicate_index, PracticeContext, knowledge_prompt, SCORE_GUIDANCE};
-use super::answer_stream::{AnswerStream, finish_error};
+use super::answer_stream::{AnswerStream, AnswerCancellation, finish_error};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,15 +289,15 @@ pub async fn mvp_decide(app: AppHandle, endpoint: ModelEndpoint, input: Decision
     Ok(decision)
 }
 
-static CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-fn flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+static CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AnswerCancellation>>>> = OnceLock::new();
+fn flags() -> &'static Mutex<HashMap<String, Arc<AnswerCancellation>>> {
     CANCEL_FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[command]
 pub fn mvp_cancel_answer(request_id: String) {
     if let Some(flag) = flags().lock().ok().and_then(|map| map.get(&request_id).cloned()) {
-        flag.store(true, Ordering::Relaxed);
+        flag.cancel();
     }
 }
 
@@ -345,27 +345,37 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
             "temperature":0.2,"max_tokens":token_limit})
     };
-    let flag = Arc::new(AtomicBool::new(false));
+    let flag = Arc::new(AnswerCancellation::default());
     flags().lock().map_err(|e| e.to_string())?.insert(request_id.clone(), flag.clone());
     let result = async {
         let key = credential(&app, &endpoint)?;
         let started = std::time::Instant::now();
-        let response = authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref()).send().await.map_err(|e| e.to_string())?
+        let request=authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref());
+        let response = tokio::select! {
+            biased;
+            _=flag.wait()=>return Ok(()),
+            response=request.send()=>response.map_err(|e|e.to_string())?,
+        }
             .error_for_status().map_err(|e| e.to_string())?;
         let _ = app.emit("mvp_answer_phase", serde_json::json!({"requestId":request_id,
             "phase":"响应就绪", "elapsedMs":started.elapsed().as_millis()}));
         let mut stream = response.bytes_stream();
         let mut decoder = AnswerStream::new(endpoint.api == "ollama");
         let mut received_chars = 0;
-        while let Some(chunk) = stream.next().await {
-            if flag.load(Ordering::Relaxed) { break; }
+        loop {
+            let chunk=tokio::select! {
+                biased;
+                _=flag.wait()=>break,
+                chunk=stream.next()=>chunk,
+            };
+            let Some(chunk)=chunk else {break;};
             for token in decoder.push(&chunk.map_err(|e| e.to_string())?) {
                 received_chars += token.chars().count();
                 let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
             }
             if decoder.is_finished() { break; }
         }
-        if flag.load(Ordering::Relaxed) { return Ok(()); }
+        if flag.is_cancelled() { return Ok(()); }
         if !decoder.is_finished() {
             for token in decoder.flush() {
                 received_chars += token.chars().count();

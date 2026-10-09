@@ -194,6 +194,9 @@ impl AudioCaptureManager {
                         "Failed to start system input capture: {}. System audio will not be captured.",
                         e
                     );
+                    self.stop_flag.store(true,Ordering::SeqCst);
+                    self.mic_stream.take();
+                    return Err(format!("System input capture failed: {e}"));
                 }
             }
         } else {
@@ -215,6 +218,9 @@ impl AudioCaptureManager {
                         "WASAPI loopback failed: {}. System audio (remote party) will not be captured.",
                         e
                     );
+                    self.stop_flag.store(true,Ordering::SeqCst);
+                    self.mic_stream.take();
+                    return Err(format!("System audio capture failed: {e}"));
                 }
             }
         }

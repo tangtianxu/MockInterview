@@ -39,22 +39,36 @@ pub fn start_system_capture_device(
 
     // Everything runs inside the spawned thread because cpal::Stream is !Send.
     // The stream must be created and kept alive on the same thread.
+    let (ready_tx,ready_rx)=std::sync::mpsc::channel();
+    let worker_stop=stop_flag.clone();
     let handle = std::thread::Builder::new()
         .name("system-audio-capture".into())
         .spawn(move || {
-            if let Err(e) = run_cpal_loopback(tx, stop_flag, device_name) {
+            if let Err(e) = run_cpal_loopback(tx, worker_stop, device_name, &ready_tx) {
+                let _=ready_tx.send(Err(e.clone()));
                 log::error!("System audio capture failed: {}", e);
             }
         })
         .map_err(|e| format!("Failed to spawn system capture thread: {}", e))?;
 
-    Ok(handle)
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(()))=>Ok(handle),
+        result=>{
+            stop_flag.store(true,Ordering::SeqCst);
+            Err(match result {
+                Ok(Err(error))=>error,
+                Err(error)=>format!("系统音频设备初始化未完成：{error}，请刷新并重新选择设备"),
+                _=>unreachable!(),
+            })
+        }
+    }
 }
 
 fn run_cpal_loopback(
     tx: mpsc::Sender<AudioChunk>,
     stop_flag: Arc<AtomicBool>,
     device_name: Option<String>,
+    ready: &std::sync::mpsc::Sender<Result<(),String>>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
 
@@ -73,11 +87,7 @@ fn run_cpal_loopback(
         }
         match found {
             Some(d) => d,
-            None => {
-                log::warn!("Output device '{}' not found, using default", name);
-                host.default_output_device()
-                    .ok_or_else(|| "No default output device".to_string())?
-            }
+            None => return Err(format!("所选输出设备 '{name}' 已不可用，请刷新并重新选择音频设备")),
         }
     } else {
         host.default_output_device()
@@ -143,6 +153,7 @@ fn run_cpal_loopback(
     .map_err(|e| format!("Failed to build loopback stream on '{}': {}", actual_name, e))?;
 
     stream.play().map_err(|e| format!("Failed to play loopback stream: {}", e))?;
+    if ready.send(Ok(())).is_err(){return Ok(());}
     log::info!("System audio loopback ACTIVE on '{}'", actual_name);
 
     // Keep stream alive until stop flag
@@ -153,6 +164,20 @@ fn run_cpal_loopback(
     drop(stream);
     log::info!("System audio loopback stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_output_device_is_reported_before_capture_is_started() {
+        let (tx,_rx)=mpsc::channel(1);
+        // Keep callbacks stopped even if a regression falls back to real hardware.
+        let stopped=Arc::new(AtomicBool::new(true));
+        let result=start_system_capture_device(tx,stopped.clone(),Some("__mock_interview_missing_output_device__".into()));
+        stopped.store(true,Ordering::SeqCst);
+        if let Ok(handle)=result {let _=handle.join();panic!("missing output must not report successful capture");}
+    }
 }
 
 fn send_system_chunk(

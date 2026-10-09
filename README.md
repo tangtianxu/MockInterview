@@ -1,8 +1,8 @@
 # 模拟面试练习 · MockInterview
 
-当前版本：1.0.11。
+当前版本：1.0.12。
 
-[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.11/MockInterview_1.0.11_x64-setup.exe) · [查看 1.0.11 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.11)
+[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.12/MockInterview_1.0.12_x64-setup.exe) · [查看 1.0.12 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.12)
 
 面向 Windows 11 的中文技术面试练习桌面应用。用户设置目标岗位、关注主题、练习范围、难度和时长后，模型逐题扮演面试官；用户可以输入回答，也可以用麦克风转写回答。每题提交后，应用显示参考评分、回答中的实际片段，以及值得进一步说明的方面。
 
@@ -121,7 +121,7 @@ API 密钥单独保存在 Windows 凭据管理器中，不写入可导出的配�
 
 | 路线 | 已适配的选择 | 使用特点 |
 | --- | --- | --- |
-| Whisper.cpp 本地识别 | 设置页列出的 GGML Whisper 模型 | 按音频块处理；是否使用 GPU 取决于安装包构建与机器环境。 |
+| Whisper.cpp 本地识别 | 设置页列出的 GGML Whisper 模型 | 通用安装包使用 CPU，按音频块处理；不要求安装 CUDA。大模型在 CPU 上可能较慢。 |
 | Sherpa-ONNX 本地识别 | Zipformer 中英双语流式、Paraformer 中英双语流式 | 支持增量文字；当前打包的是 CPU 运行库。 |
 | 语音识别 API | Groq Whisper、Deepgram Nova | 需要对应服务的密钥；录音会发送给所选服务。Groq 按音频段返回，Deepgram 提供流式结果。 |
 
@@ -202,9 +202,11 @@ API 密钥单独保存在 Windows 凭据管理器中，不写入可导出的配�
 
 **评分看起来不合理。** 分数由模型依据当前提交文本给出，可能误判。优先看它引用的回答片段是否真实，以及“可补充的方面”是否符合题目；必要时重新表述同一知识点进行下一轮练习。
 
+**启动提示找不到 `cublas64_13.dll`。** 这是旧安装包依赖开发机 CUDA 运行库造成的打包问题。从 1.0.12 起，通用安装包移除该启动依赖，不需要安装 CUDA。旧版无法启动时，直接下载新版安装包并覆盖原安装目录；设置、简历分析和模型路径继续保留。
+
 ## 从源码构建
 
-仓库包含 Tauri、React 和 Rust 实现。普通使用者可以安装已提供的 Windows 安装包；自行构建需要 Node.js/npm、Rust 的 Windows MSVC 工具链、Visual C++ 构建工具、CMake，以及本地语音依赖所需的 LLVM/libclang。具体可用版本以项目锁文件和构建脚本为准。
+仓库包含 Tauri、React 和 Rust 实现。普通使用者可以安装已提供的 Windows 安装包；自行构建需要 Node.js/npm、Python 3、Rust 的 Windows MSVC 工具链、Visual C++ 构建工具、CMake，以及本地语音依赖所需的 LLVM/libclang。具体可用版本以项目锁文件和构建脚本为准。
 
 ```powershell
 npm ci
@@ -213,7 +215,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 
 发布构建需要配置 `TAURI_SIGNING_PRIVATE_KEY` 指向维护者的发布私钥，或使用本机 `%LOCALAPPDATA%\MockInterviewRelease\signing.key`。私钥不进入仓库或安装包。自行分发的派生版本应生成自己的签名密钥，并修改 `tauri.conf.json` 中的公钥和更新源。若只运行开发版，可使用 `npm run tauri dev`，不需要发布私钥。
 
-脚本检测本机 CUDA 构建环境：检测到时构建包含 Whisper GPU 支持的版本，否则构建 CPU 版本。无论是否使用 CUDA，Sherpa-ONNX 双语模型当前仍使用打包的 CPU 运行库。构建完成后，Windows 安装包位于 `src-tauri/target/release/bundle/nsis/`。
+发布脚本固定构建不依赖 CUDA 的 CPU Whisper 版本，不再根据开发机是否安装 CUDA 自动改变用户所需的运行环境；CPU 指令基线为 AVX2，不使用开发机专属的 AVX-512 优化。Sherpa-ONNX 双语模型仍使用打包的 CPU 运行库；Ollama 的加速由其自身管理，不受此改动影响。构建和发布前均检查主程序与打包语音运行库的普通导入、延迟导入，发现 CUDA DLL 依赖时拒绝发布。构建完成后，Windows 安装包位于 `src-tauri/target/release/bundle/nsis/`。
 
 如果只检查前端，可运行 `npm run build`；Rust 代码可运行 `cargo check --manifest-path src-tauri/Cargo.toml`。
 

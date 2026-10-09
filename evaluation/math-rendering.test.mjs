@@ -21,11 +21,11 @@ test("shared formula display handles streaming, failures and narrow windows",{ti
           React.createElement('div',{className:'floating-answer expanded'},React.createElement(MathText,{text}))));}
     createRoot(document.getElementById('root')).render(React.createElement(Fixture));
     </script></body></html>`);
-  const server=spawn(process.execPath,["node_modules/vite/bin/vite.js","--host","127.0.0.1","--port","5193","--strictPort"],{windowsHide:true,stdio:"pipe"});
+  const server=spawn(process.execPath,["node_modules/vite/bin/vite.js","--host","127.0.0.1","--port","5199","--strictPort"],{windowsHide:true,stdio:"pipe"});
   let serverOutput="";server.stdout.on("data",data=>serverOutput+=data);server.stderr.on("data",data=>serverOutput+=data);
   let browser;
   try {
-    const url="http://127.0.0.1:5193/"+fixture;
+    const url="http://127.0.0.1:5199/"+fixture;
     for(let attempt=0;attempt<60;attempt++){
       if(server.exitCode!==null)throw new Error(serverOutput);
       try{if((await fetch(url)).ok)break;}catch{}

@@ -272,6 +272,7 @@ function Main() {
   const [resumeAnalysis, setResumeAnalysis] = useState<Analysis|null>(null);
   const [resumeError, setResumeError] = useState("");
   const [profileReady, setProfileReady] = useState(false);
+  const [profileWritable, setProfileWritable] = useState(false);
   const [profileEpoch, setProfileEpoch] = useState(0);
   const [practiceConfigEpoch, setPracticeConfigEpoch] = useState(0);
   const [profileNotice, setProfileNotice] = useState("");
@@ -393,6 +394,9 @@ function Main() {
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const followTranscriptRef = useRef(true);
   const profileWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const profileWritableRef = useRef(false);
+  const quitRef = useRef<()=>Promise<void>>(async()=>{});
+  const quittingRef = useRef(false);
 
   useEffect(() => {
     let cancelled=false;
@@ -408,17 +412,18 @@ function Main() {
         setSettings(restored);
       }
       setProfileEpoch(value=>value+1);
+      profileWritableRef.current=true;setProfileWritable(true);
       setProfileReady(true);
     }).catch(cause=>{
       if(cancelled)return;
-      setProfileError(`读取配置文件失败，已使用当前窗口设置：${String(cause)}`);
+      setProfileError(`读取配置文件失败，暂用当前窗口设置，未覆盖原配置。可从备份文件恢复：${String(cause)}`);
       setProfileReady(true);
     });
     return()=>{cancelled=true;};
   },[]);
   useEffect(() => { settingsRef.current = settings; localStorage.setItem("interviewCue.settings", JSON.stringify(settings)); }, [settings]);
   useEffect(() => {
-    if(!profileReady)return;
+    if(!profileReady || !profileWritable)return;
     const timer=window.setTimeout(()=>{
       const profile:SavedProfile={settings,resumeAnalysis:savedResumeAnalysis(),practiceConfig:savedPracticeConfig()};
       const save=profileWriteQueueRef.current.catch(()=>{}).then(()=>invoke("save_interview_profile",{profile}));
@@ -427,16 +432,31 @@ function Main() {
         .catch(cause=>setProfileError(`自动保存配置失败：${String(cause)}`));
     },350);
     return()=>window.clearTimeout(timer);
-  },[settings,resumeAnalysis,practiceConfigEpoch,profileReady]);
-  const updateBlocked=running || practiceActive || practiceWorking || !profileReady ||
-    startingService || testingModel!==null || linkingModels || !!download || pulling ||
-    status==="deciding" || status==="generating" || detailLoading;
-  const updater=useSoftwareUpdate(updateBlocked,async()=>{
-    // Flush the newest profile even if its normal save debounce has not fired yet.
+  },[settings,resumeAnalysis,practiceConfigEpoch,profileReady,profileWritable]);
+  const flushProfile=useCallback(async()=>{
+    if(!profileWritableRef.current)return;
     const profile:SavedProfile={settings:settingsRef.current,resumeAnalysis:savedResumeAnalysis(),practiceConfig:savedPracticeConfig()};
     const save=profileWriteQueueRef.current.catch(()=>{}).then(()=>invoke("save_interview_profile",{profile}));
     profileWriteQueueRef.current=save;await save;
-  });
+  },[]);
+  quitRef.current=async()=>{
+    if(quittingRef.current)return;
+    quittingRef.current=true;
+    try {await flushProfile();await exit(0);}
+    catch(cause){setProfileError(`关闭前保存配置失败，程序仍保持打开：${String(cause)}`);}
+    finally{quittingRef.current=false;}
+  };
+  useEffect(()=>{
+    let cancelled=false;let stop:UnlistenFn|undefined;
+    void getCurrentWebviewWindow().onCloseRequested(event=>{
+      event.preventDefault();return quitRef.current();
+    }).then(unlisten=>{if(cancelled)unlisten();else stop=unlisten;});
+    return()=>{cancelled=true;stop?.();};
+  },[]);
+  const updateBlocked=running || practiceActive || practiceWorking || !profileReady ||
+    startingService || testingModel!==null || linkingModels || !!download || pulling ||
+    status==="deciding" || status==="generating" || detailLoading;
+  const updater=useSoftwareUpdate(updateBlocked,flushProfile);
   const softwareUpdatingRef=useRef(false);softwareUpdatingRef.current=updater.busy;
   const onPracticeConfigChange=useCallback(()=>setPracticeConfigEpoch(value=>value+1),[]);
   useEffect(() => {
@@ -498,7 +518,7 @@ function Main() {
         // A WebView reload can leave an app-owned registration behind.
         if(await isRegistered(shortcut))await unregister(shortcut);
         if(cancelled)return;
-        await register(shortcut,event=>{if(event.state==="Pressed")void exit(0);});
+        await register(shortcut,event=>{if(event.state==="Pressed")void quitRef.current();});
         if(cancelled){await unregister(shortcut);return;}
         lastRegisteredShortcutRef.current=shortcut;
         setQuitShortcutError("");
@@ -808,7 +828,7 @@ function Main() {
     logDiagnostic("模型服务已切换",`${stage} · ${service}`);
   };
   const toggleSharedModels=async (enabled:boolean)=>{
-    if(modelActionRef.current || running || practiceActive)return;
+    if(modelActionRef.current || running || practiceActive || practiceWorking || startingService)return;
     modelActionRef.current=true;setLinkingModels(true);
     const current=settingsRef.current;
     try {
@@ -1150,10 +1170,10 @@ function Main() {
         setSegments(segmentsRef.current);
         if(segment.speaker!=="User")queueDecision(segment,true);
       }));
-      stops.push(await listen<{party?:string;status:string;error?:string}>("stt_connection_status",event=>{
+      stops.push(await listen<{party?:string;status:string;error?:string;message?:string}>("stt_connection_status",event=>{
         if(!active || (!runningRef.current && !captureStartingRef.current) || event.payload.status!=="error")return;
         const party=event.payload.party==="You" ? "麦克风" : "面试音频";
-        setError(`${party}转录连接失败：${event.payload.error || "请检查所选识别服务"}`);
+        setError(`${party}转录连接失败：${event.payload.error || event.payload.message || "请检查所选识别服务"}`);
         logDiagnostic("转录连接失败",party);
       }));
       stops.push(await listen<{source:string;level:number}>("audio_level", event => {
@@ -1232,7 +1252,12 @@ function Main() {
   };
 
   const start = async () => {
-    if(updater.busy)return;
+    if(updater.busy || practiceWorking || captureStartingRef.current || runningRef.current)return;
+    captureStartingRef.current=true;setStartingService(true);
+    try {await startCapture();}
+    finally {captureStartingRef.current=false;setStartingService(false);}
+  };
+  const startCapture = async () => {
     setError("");
     if (settings.sttMode === "local" && !chosenModel?.is_downloaded) {setShowSettings(true);setError("请先下载所选语音模型");return;}
     if (settings.sttMode === "api" && !savedKeys[settings.sttApiProvider]) {setShowSettings(true);setError("请先保存语音识别 API 密钥");return;}
@@ -1243,13 +1268,12 @@ function Main() {
       }
     }
     if ((settings.decision.api === "ollama" && !(settings.sharedModelConnection ? answerReady : decisionReady)) || (settings.answer.api === "ollama" && !answerReady)) {
-      setStartingService(true);
       try {
         await invoke("start_local_service",{service:"ollama"});
         await Promise.all([refreshModels("decision"),refreshModels("answer")]);
       } catch (cause) {
         setShowSettings(true);setError(`启动本地 Ollama 失败：${String(cause)}`);return;
-      } finally {setStartingService(false);}
+      }
     }
     try {
       cancelAnswer();answerDisplayRef.current=null;questionHistoryRef.current=[];
@@ -1279,9 +1303,7 @@ function Main() {
       const them = {role:"Them",device_id:settings.output,is_input_device:false,
         stt_provider:settings.sttMode === "local" ? settings.sttEngine : settings.sttApiProvider,
         local_model_id:settings.sttMode === "local" ? settings.sttModel : null};
-      captureStartingRef.current=true;
-      try {await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});}
-      finally {captureStartingRef.current=false;}
+      await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});
       segmentsRef.current=[];setSegments([]);setPartial(null);partialRef.current=null;
       micPartialRef.current=null;setMicPartial(null);savedIntroductionRef.current=false;
       questionRef.current="";activeSourceRef.current="";
@@ -1294,7 +1316,10 @@ function Main() {
       publishHint("");lastDecisionTextRef.current="";decisionVersionRef.current++;
       sessionEpochRef.current++;runningRef.current=true;setRunning(true);setStatus("listening");
       logDiagnostic("开始聆听",`${settings.sttEngine}/${settings.sttModel} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
-    } catch (cause) {setStatus("error");setError(`无法开始采集：${String(cause)}`);}
+    } catch (cause) {
+      await invoke("stop_capture").catch(()=>{});
+      setStatus("error");setError(`无法开始采集：${String(cause)}`);
+    }
   };
   const stop = async () => {
     sessionEpochRef.current++;runningRef.current=false;setRunning(false);setStatus("idle");decisionVersionRef.current++;
@@ -1347,6 +1372,8 @@ function Main() {
       else localStorage.removeItem("interviewCue.practiceConfig");
       if(profile.resumeAnalysis)localStorage.setItem("interviewCue.resumeAnalysis",JSON.stringify(profile.resumeAnalysis));
       else localStorage.removeItem("interviewCue.resumeAnalysis");
+      settingsRef.current=restored;connectionEpochRef.current++;
+      profileWritableRef.current=true;setProfileWritable(true);
       setSettings(restored);
       setProfileEpoch(value=>value+1);
       setProfileNotice("配置已导入。模型存放路径及 Ollama 程序路径重启后生效；请重新选择或确认 API 密钥。");
@@ -1358,7 +1385,7 @@ function Main() {
     const slot = credentialSlot(config,settings.sharedModelConnection ? "answer" : stage);
     const selectedService=serviceId(config);
     const service=modelServices.find(item=>item.id===selectedService)!;
-    const busy=running || practiceActive || testingModel!==null || linkingModels;
+    const busy=running || startingService || practiceWorking || practiceActive || testingModel!==null || linkingModels;
     const connected=connectedModels[stage]===config.model && Boolean(config.model);
     return <div className="setting-group model-connection" key={stage}>
       <div className="setting-heading"><Sparkles size={18}/>{title}
@@ -1407,10 +1434,10 @@ function Main() {
       <div className="brand">
         <div className="brand-mark" role="button" tabIndex={0} title="双击切换练习与实时提示页面"
           aria-label="双击切换练习与实时提示页面" onDoubleClick={()=>{
-            if (running || practiceActive || updater.busy) {setSwitchNotice("请先结束当前操作");return;}
+            if (running || startingService || practiceWorking || practiceActive || updater.busy) {setSwitchNotice("请先结束当前操作");return;}
             setSwitchNotice("");setWorkspaceMode(value=>value==="practice"?"assist":"practice");
           }}
-          onKeyDown={event=>{if(event.key==="Enter" && !running && !practiceActive && !updater.busy)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
+          onKeyDown={event=>{if(event.key==="Enter" && !running && !startingService && !practiceWorking && !practiceActive && !updater.busy)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
         <div><strong>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
           <span>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
       <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : (settings.sharedModelConnection ? answerReady : decisionReady && answerReady) ? "本地模型已连接" : "本地模型未连接"}</span>
@@ -1443,7 +1470,7 @@ function Main() {
         <div className="window-actions">
           <button className="window-action" aria-label="最小化" title="最小化" onClick={()=>void getCurrentWebviewWindow().minimize()}><Minus size={16}/></button>
           <button className="window-action" aria-label="最大化或还原" title="最大化或还原" onClick={()=>void getCurrentWebviewWindow().toggleMaximize()}><Maximize2 size={14}/></button>
-          <button className="window-action close" aria-label="关闭程序" title="关闭程序" onClick={()=>void getCurrentWebviewWindow().close()}><X size={17}/></button>
+          <button className="window-action close" aria-label="关闭程序" title="关闭程序" onClick={()=>void quitRef.current()}><X size={17}/></button>
         </div>
     </header>
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
@@ -1561,14 +1588,14 @@ function Main() {
         </>}
         {settingsTab === "profile" && <>
         <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 面试背景</div>
-          <label>目标岗位（可选）<input value={settings.targetRole} maxLength={120} disabled={running || practiceActive}
+          <label>目标岗位（可选）<input value={settings.targetRole} maxLength={120} disabled={running || practiceActive || practiceWorking || startingService}
             placeholder="如：算法工程师" onChange={event=>update({targetRole:event.target.value})}/></label>
-          <label>关注主题（可选）<input value={settings.focusTopics} maxLength={300} disabled={running || practiceActive}
+          <label>关注主题（可选）<input value={settings.focusTopics} maxLength={300} disabled={running || practiceActive || practiceWorking || startingService}
             placeholder="如：具身智能、通信协议" onChange={event=>update({focusTopics:event.target.value})}/></label>
           <p className="setting-help">岗位与主题只帮助选题和术语消歧，不作为个人经历事实。使用外部模型时，这两个填写项可能随请求发送。</p>
-          <div className="setup-actions"><button className="download-btn" disabled={running || practiceActive} onClick={()=>void chooseSharedResume()}>
+          <div className="setup-actions"><button className="download-btn" disabled={running || practiceActive || practiceWorking || startingService} onClick={()=>void chooseSharedResume()}>
             {settings.resumePath?"更换简历":"选择简历"}</button>
-            {settings.resumePath && <button className="download-btn" disabled={running || practiceActive} onClick={clearResume}>移除简历</button>}</div>
+            {settings.resumePath && <button className="download-btn" disabled={running || practiceActive || practiceWorking || startingService} onClick={clearResume}>移除简历</button>}</div>
           {settings.resumePath && <p className="setting-help">已保存路径：{settings.resumePath}。{resumeAnalysis?"本地分析已保存；只取简历原文中出现的术语作本地消歧。":"尚未分析；在练习页使用本地 Ollama 分析后可供实时提示使用。"}</p>}
           {resumeError && <p className="setting-help" role="alert">{resumeError}</p>}
           <p className="setting-help">简历原文不用于实时技术题答案。外部判别、回答及语音 API 默认不会收到简历提取内容。</p>
@@ -1595,9 +1622,9 @@ function Main() {
         </div>
         <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 配置保存与备份</div>
           <p className="setting-help">模型选择、接口地址、个人资料、简历路径和已完成的简历分析会自动保存到本机配置文件，更新同一应用后继续读取。</p>
-          <div className="setup-actions"><button className="download-btn" disabled={!profileReady || running || practiceActive}
+          <div className="setup-actions"><button className="download-btn" disabled={!profileReady || running || practiceActive || practiceWorking || startingService}
             onClick={()=>void exportProfile()}>导出配置文件</button>
-            <button className="download-btn" disabled={!profileReady || running || practiceActive}
+            <button className="download-btn" disabled={!profileReady || running || practiceActive || practiceWorking || startingService}
               onClick={()=>void importProfile()}>从文件导入</button></div>
           <p className="setting-help">备份包含资料和简历分析，请妥善保管。API 密钥由 Windows 凭据管理器单独保存，不写入备份；简历原文件也不会复制进去。</p>
           {profileNotice && <p className="setting-help" role="status">{profileNotice}</p>}
@@ -1638,7 +1665,7 @@ function Main() {
 </div>
         <div className="setting-group"><div className="setting-heading"><Sparkles size={18}/> 模型连接方式</div>
           <label className="connection-sharing"><input type="checkbox" checked={settings.sharedModelConnection}
-            disabled={running || practiceActive || testingModel!==null || linkingModels}
+            disabled={running || practiceActive || practiceWorking || startingService || testingModel!==null || linkingModels}
             onChange={e=>void toggleSharedModels(e.target.checked)}/><span>判别与回答共用连接（推荐）</span></label>
           <p className="setting-help">{linkingModels ? "正在切换连接设置…" : settings.sharedModelConnection
             ? "只需设置一次服务、密钥和模型。练习出题与评价也使用这份连接。复杂追问及术语纠偏依赖判别模型能力；本地小模型不稳定时，可选择更强的 API 模型。"

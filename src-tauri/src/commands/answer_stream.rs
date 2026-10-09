@@ -1,4 +1,20 @@
 //! Decode text only after a complete byte line, then verify the provider's ending.
+use std::sync::atomic::{AtomicBool,Ordering};
+use tokio::sync::Notify;
+
+#[derive(Default)]
+pub(super) struct AnswerCancellation {
+    cancelled: AtomicBool,
+    wake: Notify,
+}
+impl AnswerCancellation {
+    pub fn cancel(&self) {self.cancelled.store(true,Ordering::SeqCst);self.wake.notify_one();}
+    pub fn is_cancelled(&self)->bool {self.cancelled.load(Ordering::SeqCst)}
+    pub async fn wait(&self) {
+        let notified=self.wake.notified();
+        if !self.is_cancelled(){notified.await;}
+    }
+}
 pub(super) fn finish_error(reason: &str) -> Option<&'static str> {
     match reason {
         "length" | "max_tokens" => Some("回答达到模型输出上限，内容未生成完；请点击问题框缩小问题范围或重新生成。"),
@@ -88,7 +104,17 @@ impl AnswerStream {
 
 #[cfg(test)]
 mod tests {
-    use super::AnswerStream;
+    use super::{AnswerStream,AnswerCancellation};
+
+    #[tokio::test]
+    async fn cancellation_wakes_pending_waits_and_remembers_early_cancellation() {
+        let signal=AnswerCancellation::default();
+        let wait=signal.wait();tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+        signal.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(100),wait).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100),signal.wait()).await.unwrap();
+    }
 
     #[test]
     fn split_utf8_and_unterminated_final_line_are_preserved() {
