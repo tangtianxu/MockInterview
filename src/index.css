@@ -108,15 +108,14 @@ html,body,#root{overflow:hidden}:root{--scrollbar-thumb:#34495a;--scrollbar-thum
 .answer-content{min-height:0;overflow-y:auto;flex:1 1 auto}
 .question-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
 .question-heading .answer-label{margin-bottom:0}
-.question-edit-btn{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:#78d9c1;font-size:11px;padding:4px 0}
-.question-edit-btn:hover{color:#aff7df}
+.question-box.editable{display:block;width:100%;text-align:left;cursor:text}
+.question-box.editable:hover{border-color:#4a9687}
 .question-editor textarea{display:block;width:100%;min-height:82px;resize:vertical;border:1px solid #4a9687;border-radius:12px;background:#10242b;color:#e3f1ee;padding:13px 15px;font:inherit;font-size:13px;line-height:1.6;outline:0}
 .question-editor textarea:focus{border-color:#70ddba;box-shadow:0 0 0 2px #70ddba30}
 .question-editor-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:9px}
 .question-editor-actions span{margin-right:auto;color:#8197a8;font-size:10px}
 .question-editor-actions button{border:1px solid #365163;border-radius:8px;padding:7px 10px;background:#1b2a37;color:#cadbdc;font-size:11px}
 .question-editor-actions button.primary{border-color:#4abda8;background:#17483e;color:#bff5e4}
-.theme-light .question-edit-btn{color:#177c6d}
 .theme-light .question-editor textarea{background:#fffefa;border-color:#82bba8;color:#253d3d}
 .theme-light .question-editor-actions button{background:#fffefa;border-color:#c5d7cf;color:#36514b}
 .theme-light .question-editor-actions button.primary{background:#d9f2e5;border-color:#77bda5;color:#176a58}
@@ -192,13 +191,13 @@ html,body,#root{background:transparent!important}
 }
 
 /* Keep the title and every window control legible instead of wrapping inside a fixed-height header. */
-.app-header{height:82px;min-height:82px;gap:14px;padding:0 20px}
-.brand{flex:0 0 220px;min-width:220px}
+.app-header{display:grid;grid-template-columns:220px minmax(0,1fr);grid-template-rows:31px auto;column-gap:14px;row-gap:5px;height:auto;min-height:82px;padding:10px 20px}
+.brand{grid-column:1;grid-row:1 / 3;min-width:220px}
 .brand strong,.brand span{white-space:nowrap}
-.header-actions{flex:1;flex-wrap:nowrap;gap:3px;min-width:0}
+.header-actions{grid-column:2;grid-row:2;flex-wrap:wrap;gap:3px;min-width:0}
 .header-actions>.ghost-btn{padding:9px 7px;white-space:nowrap}
 .local-pill{white-space:nowrap}
-.window-actions{margin-left:2px}
+.app-header>.window-actions{grid-column:2;grid-row:1;justify-self:end;margin-left:0}
 .app-shell{border:0}
 .app-shell,.floating-shell{position:relative}
 .resize-corner{position:absolute;z-index:30;width:18px;height:18px;touch-action:none}

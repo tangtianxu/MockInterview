@@ -16,7 +16,7 @@ localStorage.setItem('interviewCue.settings',JSON.stringify({theme:params.get('t
 mockIPC(async(command,args)=>{
  window.calls.push({command,args});
  if(command==='load_interview_profile')return null;
- if(command==='plugin:app|version')return '1.0.7';
+ if(command==='plugin:app|version')return '1.0.8';
  if(command==='list_audio_devices'||command==='list_local_stt_engines')return '[]';
  if(command==='mvp_list_models')return [];
  if(command==='local_stt_model_directory')return 'fixture';
@@ -67,6 +67,8 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
       await page.setViewportSize(viewport);await page.goto(url+'?theme='+theme);
       await page.locator('.app-version').waitFor();
       await checkDrags('.app-header');
+      const positions=await page.evaluate(()=>({controls:document.querySelector('.window-actions').getBoundingClientRect().bottom,actions:document.querySelector('.header-actions').getBoundingClientRect().top}));
+      assert.ok(positions.controls<=positions.actions,'window controls must remain above business actions');
       const checkLayout=async()=>{
         const layout=await page.evaluate(()=>{
           const shell=document.querySelector('.app-shell'),header=document.querySelector('.app-header');
@@ -85,6 +87,7 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
       await checkLayout();
       await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();
       await checkLayout();
+      assert.ok(await page.evaluate(()=>document.querySelector('.window-actions').getBoundingClientRect().bottom<=document.querySelector('.header-actions').getBoundingClientRect().top));
       if(viewport.width<=940){
         const before=await page.locator('.app-header').boundingBox();
         await page.locator('.workspace').evaluate(element=>{element.scrollTop=500;});

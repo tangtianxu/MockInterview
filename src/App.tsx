@@ -897,10 +897,13 @@ function Main() {
         requestId, question:nextQuestion, focus, keyTerms, constraints, uncertainTerms:terms,
         answerInstructions:[settingsRef.current.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
     } catch (cause) { if (answerRequestRef.current === requestId) {
+      const display=answerDisplayRef.current;
+      if(display && answerTextRef.current.trim())showAnswerSnapshot(display,answerTextRef.current.trim());
       answerRequestRef.current="";answerDisplayRef.current=null;
       setStatus("error");setError(`回答生成失败：${String(cause)}`);
+      logDiagnostic("回答生成失败",String(cause));
     } }
-  }, []);
+  }, [showAnswerSnapshot,logDiagnostic]);
 
   const submitEditedQuestion = useCallback(() => {
     const corrected=questionDraft.trim();
@@ -1073,7 +1076,10 @@ function Main() {
         const finishedAt=performance.now();
         const display=answerDisplayRef.current;
         answerRequestRef.current = "";
-        if (event.payload.error) {setStatus("error");setError(event.payload.error);logDiagnostic("回答生成失败");}
+        if (event.payload.error) {
+          if(display && answerTextRef.current.trim())showAnswerSnapshot(display,answerTextRef.current.trim());
+          setStatus("error");setError(event.payload.error);logDiagnostic("回答生成失败",event.payload.error);
+        }
         else if (!answerTextRef.current.trim()) {
           setStatus("error");setError("回答接口没有返回可显示的内容");logDiagnostic("回答为空");
         }
@@ -1323,11 +1329,12 @@ function Main() {
           {running?<><Square size={14} fill="currentColor"/> 结束练习</>:startingService?"连接本地模型…":<><Play size={15} fill="currentColor"/> 开始聆听</>}
         </button>
         </>}
+      </div>
         <div className="window-actions">
           <button className="window-action" aria-label="最小化" title="最小化" onClick={()=>void getCurrentWebviewWindow().minimize()}><Minus size={16}/></button>
           <button className="window-action" aria-label="最大化或还原" title="最大化或还原" onClick={()=>void getCurrentWebviewWindow().toggleMaximize()}><Maximize2 size={14}/></button>
           <button className="window-action close" aria-label="关闭程序" title="关闭程序" onClick={()=>void getCurrentWebviewWindow().close()}><X size={17}/></button>
-        </div></div>
+        </div>
     </header>
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
@@ -1365,10 +1372,7 @@ function Main() {
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
       </section>
       <section className="answer-panel"><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
-        <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div>
-          {!editingQuestion && <button className="question-edit-btn" onClick={()=>{
-            setQuestionDraft(question);setEditingQuestion(true);
-          }}><Pencil size={13}/> 编辑问题</button>}</div>
+        <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div></div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
               value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
               onKeyDown={event=>{
@@ -1379,7 +1383,8 @@ function Main() {
               }}/><div className="question-editor-actions"><span>{running ? "修正后重新生成提示" : "直接测试回答，无需开始聆听"} · Ctrl+Enter 提交</span>
               <button onClick={()=>setEditingQuestion(false)}>取消</button>
               <button className="primary" disabled={!questionDraft.trim()} onClick={submitEditedQuestion}>{question ? "保存并重新回答" : "生成回答"}</button></div></div>
-            : <div className={question?"question-box active":"question-box"}><MathText text={question || "等待一个足够明确的面试问题…"}/></div>}
+            : <button type="button" className={question?"question-box editable active":"question-box editable"} aria-label="编辑问题" title="点击编辑问题"
+              onClick={()=>{setQuestionDraft(question);setEditingQuestion(true);}}><MathText text={question || "点击输入问题，或等待转录识别…"}/></button>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
           <div className="answer-label answer-label-space">定义与原理 <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>

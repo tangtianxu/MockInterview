@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mute
 use tauri::{command, AppHandle, Emitter, Manager};
 use crate::state::AppState;
 use super::practice_protocol::{safe_feedback, repeated_question, duplicate_index, PracticeContext, knowledge_prompt, SCORE_GUIDANCE};
+use super::answer_stream::{AnswerStream, finish_error};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,7 +316,9 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     let system = knowledge_prompt(&system);
     let practice_reference = practice_reference.unwrap_or(false);
     let system = if practice_reference {format!("{system}\n本次是模拟面试复盘。针对题目逐点给出参考答案，用 4 到 8 句解释因果链和基本思想，不限于两段。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};
-    let token_limit = if practice_reference {700} else {280};
+    // Prompt controls brevity; the transport budget must leave room for complete
+    // Chinese explanations, acronym expansions and formula source.
+    let token_limit = if practice_reference {1536} else {1024};
     let messages = serde_json::json!([{"role":"system","content":system},{"role":"user","content":user}]);
     let body = if endpoint.api == "ollama" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
@@ -334,26 +337,26 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         let response = authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref()).send().await.map_err(|e| e.to_string())?
             .error_for_status().map_err(|e| e.to_string())?;
         let mut stream = response.bytes_stream();
-        let mut pending = String::new();
+        let mut decoder = AnswerStream::new(endpoint.api == "ollama");
+        let mut received_chars = 0;
         while let Some(chunk) = stream.next().await {
             if flag.load(Ordering::Relaxed) { break; }
-            pending.push_str(&String::from_utf8_lossy(&chunk.map_err(|e| e.to_string())?));
-            while let Some(index) = pending.find('\n') {
-                let line = pending[..index].trim().to_string();
-                pending.drain(..=index);
-                let data = if endpoint.api == "ollama" { line.as_str() }
-                    else { line.strip_prefix("data:").map(str::trim).unwrap_or("") };
-                if data.is_empty() || data == "[DONE]" { continue; }
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-                    let token = if endpoint.api == "ollama" { value["message"]["content"].as_str() }
-                        else { value["choices"][0]["delta"]["content"].as_str() };
-                    if let Some(token) = token.filter(|value| !value.is_empty()) {
-                        let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
-                    }
-                }
+            for token in decoder.push(&chunk.map_err(|e| e.to_string())?) {
+                received_chars += token.chars().count();
+                let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
+            }
+            if decoder.is_finished() { break; }
+        }
+        if flag.load(Ordering::Relaxed) { return Ok(()); }
+        if !decoder.is_finished() {
+            for token in decoder.flush() {
+                received_chars += token.chars().count();
+                let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
             }
         }
-        Ok::<(), String>(())
+        let outcome = decoder.outcome();
+        log::info!("Answer stream: budget={token_limit}, received_chars={received_chars}, outcome={:?}", outcome);
+        outcome
     }.await;
     flags().lock().map_err(|e| e.to_string())?.remove(&request_id);
     let _ = app.emit("mvp_answer_done", serde_json::json!({"requestId":request_id,"error":result.as_ref().err()}));
@@ -375,17 +378,20 @@ pub async fn mvp_explain(app: AppHandle, endpoint: ModelEndpoint, question: Stri
     ]);
     let body = if endpoint.api == "ollama" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,"think":false,
-            "options":{"temperature":0.2,"num_predict":420}})
+            "options":{"temperature":0.2,"num_predict":1024}})
     } else if endpoint.api == "deepseek" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,
-            "thinking":{"type":"disabled"},"max_tokens":420})
+            "thinking":{"type":"disabled"},"max_tokens":1024})
     } else {
-        serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,"max_tokens":420})
+        serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,"max_tokens":1024})
     };
     let value: serde_json::Value = authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref())
         .send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
+    let reason = if endpoint.api == "ollama" { value["done_reason"].as_str() }
+        else { value["choices"][0]["finish_reason"].as_str() };
+    if let Some(error) = reason.and_then(finish_error) { return Err(error.into()); }
     let content = if endpoint.api == "ollama" { value["message"]["content"].as_str() }
         else { value["choices"][0]["message"]["content"].as_str() };
     content.filter(|text| !text.trim().is_empty()).map(str::to_string)
