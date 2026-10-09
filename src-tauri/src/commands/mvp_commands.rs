@@ -24,6 +24,8 @@ pub struct ModelEndpoint {
 pub struct DecisionInput {
     pub context: String,
     pub current_text: String,
+    #[serde(default)]
+    pub candidate_reply: String,
     pub previous_question: String,
     pub visible_question: String,
     #[serde(default)]
@@ -134,9 +136,11 @@ pub async fn mvp_copy_model_key(app: AppHandle, endpoint: ModelEndpoint, target_
     Ok(false)
 }
 
+const DECISION_INTENTS: &[&str] = &["statement", "incomplete", "question", "uncertain", "personal", "self_introduction"];
+
 fn decision_schema() -> serde_json::Value {
     serde_json::json!({"type":"object","properties":{
-        "intent":{"type":"string","enum":["statement","incomplete","question","uncertain","personal"]},
+        "intent":{"type":"string","enum":DECISION_INTENTS},
         "relation":{"type":"string","enum":["new","follow_up","repeat","none"]},
         "action":{"type":"string","enum":["wait","show","revise","keep"]},
         "question":{"type":"string"},
@@ -228,21 +232,26 @@ async fn chat(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &st
     content.map(str::to_string).ok_or("判别模型没有返回文字".into())
 }
 
+// Retain the topic at the beginning and the final request when ASR emits a long turn.
+fn bounded_current_transcript(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 1000 { return text.to_string(); }
+    format!("{}\n[中间背景已截短]\n{}", chars[..350].iter().collect::<String>(),
+        chars[chars.len()-650..].iter().collect::<String>())
+}
+
 #[command]
 pub async fn mvp_decide(app: AppHandle, endpoint: ModelEndpoint, input: DecisionInput) -> Result<Decision, String> {
-    let system = "你是中文技术面试的实时任务提取器。根据最新语音转录及上下文，判断此刻是否值得给候选人显示技术回答提示。输出单个 JSON 对象。不要根据疑问词、标点或停顿作决定，只看语义。\n\
-需要提示的任务包括解释概念、介绍技术、比较方案、说明为何选择 A 而不选择 B、分析优劣或解决问题；祈使句也可能是任务。focus 提取必须回答的技术要点，key_terms 提取最多三个值得解释的技术术语（保留原文拼写，不要把普通词凑进去），constraints 提取明确条件。question 只写可以用通用技术知识解释的任务，不补造条件。\n\
-面试助手只补充技术原理。纯粹询问家乡、年龄、个人经历或某个项目实际做过什么时，intent=personal、action=wait；如果同一句还涉及明确技术概念，则只提取其中可解释的技术部分并 show，不推断项目事实。例如“固件怎样更新，是否用了 Bootloader”提取“固件更新流程与 Bootloader 的工作原理是什么”，key_terms 包含 Bootloader，不回答个人项目是否使用。普通陈述或面试官自己的回答也 wait；任务尚未明确时 intent=incomplete，action=wait；新任务 show；新增技术约束或追问 revise；追问省略主体时，用上一问题中明确的主体补全 question，例如上一题“PPO 是什么”、最新“什么情况下使用”应提取“PPO 在什么情况下使用”，relation=follow_up。最新明确换题时采用新主体，不沿用旧题；无法确定指代时 wait，不猜测。重复而无新信息 keep。同一任务的 question、focus、key_terms、constraints 用稳定措辞与顺序；只判断最新转录，前文旧题不可重新触发。ASR 增量修正错字或换一种说法时，若技术任务未变，relation=repeat、action=keep。只有新信息改变必须回答的内容时才 revise。转录标为稳定只表示识别器结束一个音频片段，不代表问题结束。\n\
-ASR 可能听错技术术语。只有从上下文有充分把握时才能规范写法；不能确定的词放入 uncertain_terms，不可凭常见题型猜定。若歧义影响整个任务，intent=uncertain 且 wait；若其余内容仍足够作答，可 show 并保留 uncertain_terms。视频测试中同一音轨可能包含双方讲话，结合对话判断是否正在向候选人布置任务。
-必须只返回以下字段的 JSON，不加 Markdown：intent（statement/incomplete/question/uncertain/personal），relation（new/follow_up/repeat/none），action（wait/show/revise/keep），question（字符串），focus（字符串数组），key_terms（字符串数组），constraints（字符串数组），uncertain_terms（字符串数组）。没有内容的数组返回 []，没有可回答技术任务时 question 返回空字符串。";
-    let user = format!("场景：{}\n术语背景（仅用于消歧，不能补造转录内容或个人事实）：{}\n前文：{}\n上一问题：{}\n当前显示：{}\n转录状态：{}\n最新转录：{}",
+    let system = "你是中文技术面试的实时任务提取器。结合带角色的对话，提取最新面试官发言布置的任务。只返回一个 JSON 对象，不输出正文或 Markdown。\n按以下优先级处理：\n1. 最新明确请求优先。候选人的发言用于确定指代、场景和已选择的方法，不是新提问，也不是正确知识或已核实个人事实。视频单音轨可能包含双方，要结合语义区分。\n2. “它、这个方法、怎么解决”这类追问，优先关联最近对话中明确说出的对象，包括候选人刚说的技术方法；对话仍无明确对象才使用上一问题。上一问题和当前显示只是辅助，不能覆盖最新对话里的对象。面试官先给出主体、工程背景和异常现象再问怎么解决时，将相关主体、明确现象、限制条件、最终请求整合到 question；保留观察，不擅自认定原因。只有背景陈述而任务尚不明确时 wait。\n3. 提取问题前先判断 ASR 术语是否误识别：只有最近对话和领域背景充分支持音近纠错时，使用规范术语，question 与 key_terms 保持一致；纠错优先于保留错误拼写。明确切换新主题或给出新词释义时尊重新词，不被旧题带偏。无法确认则放入 uncertain_terms，歧义影响整个任务时 uncertain/wait。\n4. 最新任务确实是要求候选人作自我介绍时，intent=self_introduction、action=show，question=“请进行自我介绍”，所有数组为空。应用会读取本机保存稿，你不编写介绍。“怎样写自我介绍”属于回答组织思路；“自我介绍中提到的 PPO 是什么”属于技术问题，均不使用 self_introduction。\n5. 只补充通用技术知识及回答组织思路。纯个人经历、年龄、家乡或项目实际做过什么时 personal/wait。同一句涉及可解释的技术概念时，只提取技术部分，不能推断候选人的经历。例如问“固件怎么更新，你是否用了 Bootloader”，提取固件更新流程及 Bootloader 原理。\n6. 解释概念、比较、分析选择依据、解决问题以及祈使句均可能是任务。不要仅按疑问词、停顿、标点判定。普通陈述、候选人的回答、面试官自己的解释 wait；新任务 show；追问或新增明确技术条件 revise；重复而无新信息 keep。ASR 增量修正措辞且技术任务不变时 repeat/keep。稳定片段只表示识别片段结束。前文旧题不能单独触发新任务。\nfocus 写必须覆盖的技术要点；key_terms 写最多三个值得解释的技术术语，不凑普通词；constraints 写明确限制；uncertain_terms 写尚不能确认的术语。\n示例 A：上一问题是“PPO 是什么”，最近对话是“候选人：我采用 GAE 估计优势”，最新问“为什么选择它”。输出 {\"intent\":\"question\",\"relation\":\"follow_up\",\"action\":\"revise\",\"question\":\"为什么在 PPO 中选择 GAE 估计优势\",\"focus\":[\"选择 GAE 的依据\"],\"key_terms\":[\"PPO\",\"GAE\"],\"constraints\":[],\"uncertain_terms\":[]}。主体包含最新回答中的 GAE，不能仍回答 PPO 在什么时候使用。\n示例 B：最近明确讨论强化学习里的 PPO，最新转录“BPO 在什么情况下使用”，没有换题迹象。输出 {\"intent\":\"question\",\"relation\":\"follow_up\",\"action\":\"revise\",\"question\":\"PPO 在什么情况下使用\",\"focus\":[\"适用条件\"],\"key_terms\":[\"PPO\"],\"constraints\":[],\"uncertain_terms\":[]}。若明确给出 BPO 是另一个新概念的释义，就保留 BPO。\n必须完整返回以下八个字段：intent（statement/incomplete/question/uncertain/personal/self_introduction），relation（new/follow_up/repeat/none），action（wait/show/revise/keep），question（字符串），focus、key_terms、constraints、uncertain_terms（字符串数组）。无内容数组用 []；无任务时 question 用空字符串。";
+    let user = format!("场景：{}\n术语背景（仅消歧）：{}\n\n历史辅助信息（可能已经过时，不代表最新主题）：\n上一问题：{}\n当前显示：{}\n\n最新对话（以下内容比历史辅助信息更新，保留角色）：\n{}\n\n最近一次候选人回答（仅帮助确定追问指代，其中明确说出的工具或方法优先于旧题）：\n{}\n\n本次识别状态：{}\n最新需要判别的转录：{}",
         if input.video_mode {"面试视频测试"} else {"远程面试"},
         input.topic_background.chars().take(400).collect::<String>(),
-        input.context.chars().rev().take(1300).collect::<String>().chars().rev().collect::<String>(),
         input.previous_question.chars().take(250).collect::<String>(),
         input.visible_question.chars().take(250).collect::<String>(),
+        input.context.chars().rev().take(3000).collect::<String>().chars().rev().collect::<String>(),
+        bounded_current_transcript(&input.candidate_reply),
         if input.is_final {"音频片段已稳定"} else {"识别中，文字仍可能变化"},
-        input.current_text.chars().take(600).collect::<String>());
+        bounded_current_transcript(&input.current_text));
     let raw = chat(&app, &endpoint, system, &user, 360).await?;
     let first_trimmed = raw.trim().trim_start_matches("```json").trim_start_matches("```")
         .trim_end_matches("```").trim();
@@ -262,7 +271,7 @@ ASR 可能听错技术术语。只有从上下文有充分把握时才能规范�
                 key_terms:vec![], constraints:vec![], uncertain_terms:vec![] });
         }
     };
-    if !matches!(decision.intent.as_str(), "statement" | "incomplete" | "question" | "uncertain" | "personal")
+    if !DECISION_INTENTS.contains(&decision.intent.as_str())
         || !matches!(decision.relation.as_str(), "new" | "follow_up" | "repeat" | "none")
         || !matches!(decision.action.as_str(), "wait" | "show" | "revise" | "keep") {
         return Err("判别结果包含不支持的状态".into());
@@ -270,7 +279,7 @@ ASR 可能听错技术术语。只有从上下文有充分把握时才能规范�
     if matches!(decision.action.as_str(), "show" | "revise") && decision.question.trim().is_empty() {
         return Err("判别模型要求显示提示，但没有提取问题".into());
     }
-    if decision.action == "show" && decision.intent != "question" {
+    if decision.action == "show" && !matches!(decision.intent.as_str(), "question" | "self_introduction") {
         return Err("判别模型的意图与显示动作不一致".into());
     }
     if matches!(decision.intent.as_str(), "personal" | "uncertain" | "incomplete") &&

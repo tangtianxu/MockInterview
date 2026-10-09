@@ -1117,7 +1117,8 @@ pub async fn start_capture_per_party(
     if you_stt_provider.is_some() {
         let stt_app = app.clone();
         let prefix = session_prefix.clone();
-        let use_accumulator = you.stt_provider != "web_speech" && you.stt_provider != "whisper_cpp";
+        let use_accumulator = you.stt_provider != "web_speech" && you.stt_provider != "whisper_cpp"
+            && you.stt_provider != "sherpa_bilingual";
         let pause_threshold = if use_accumulator {
             Some(app.state::<AppState>().pause_threshold_ms.clone())
         } else {

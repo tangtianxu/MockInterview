@@ -11,6 +11,7 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Maximize2, Mic2, Minus, MonitorPlay, Moon, PanelLeftClose, PanelLeftOpen, Pause, Pin, Play, Radio, RefreshCw, ScanText, Settings2, Sparkles, Sun,
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
+import { dialogueContext } from "./dialogueContext";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
 import {connectModel,validateModelAddress} from "./modelConnection";
@@ -23,6 +24,7 @@ type SttMode = "local" | "api";
 type SttApiProvider = "groq_whisper" | "deepgram";
 type Mode = "live" | "video";
 type Status = "idle" | "listening" | "deciding" | "generating" | "error";
+type DisplaySource = AnswerSource | "saved";
 type ModelEndpoint = ModelConfig & { credentialSlot: string };
 type OllamaRuntime = { executable: string | null; configuredExecutable: string | null;
   configFile: string; modelsDirectory: string | null; connected: boolean };
@@ -37,6 +39,7 @@ type Settings = {
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
   targetRole: string; focusTopics: string; resumePath: string;
+  micTranscription:boolean; selfIntroduction:string;
 };
 type SavedProfile = {settings:Settings;resumeAnalysis:{hash:string;analysis:Analysis}|null;
   practiceConfig?:PracticeConfig|null};
@@ -48,7 +51,7 @@ type Segment = { id: string; text: string; speaker: string; timestamp_ms: number
 type Decision = { intent: string; relation: string; action: "wait" | "show" | "revise" | "keep"; question: string;
   focus: string[]; key_terms: string[]; constraints: string[]; uncertain_terms: string[] };
 type OverlayState = { question: string; hint: string; status: Status; locked: boolean;
-  uncertainTerms: string[]; keyTerms: string[]; detail: string; detailLoading: boolean };
+  uncertainTerms: string[]; keyTerms: string[]; detail: string; detailLoading: boolean; detailAvailable?:boolean };
 type PracticePreview = {question:string;hint:string};
 
 const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在进行秋招技术面试。请把听到的技术问题转成便于口头回答的中文提示：首次出现英文术语时给中文释义，缩写能确认时先给英文全称和中文含义；然后简短说明定义与关键原理。每段一到两句话，避免空话。比较题说明选择依据和适用边界；不要编造我的项目经历。";
@@ -59,6 +62,7 @@ const defaults: Settings = {
   launcherOnTop: false, quitShortcut: "Control+Backquote",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
+  micTranscription:true, selfIntroduction:"",
   decision: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answerInstructions: "",
@@ -87,6 +91,8 @@ function loadSettings(input?: unknown): Settings {
       modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
     const sharedModelConnection=sharedConnectionDefault(old);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
+      micTranscription:old.micTranscription!==false,
+      selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
       parallelAnswer:old.parallelAnswer===true,
       parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
       targetRole:typeof old.targetRole === "string" ? old.targetRole.slice(0,120) :
@@ -238,12 +244,12 @@ function Overlay() {
       {!practice && state.keyTerms.length > 0 && <div className="term-list">{state.keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
       {!practice && state.uncertainTerms.length > 0 && <div className="term-warning">术语待确认：{state.uncertainTerms.join("、")}</div>}
       <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <MathText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? <MathText text={state.hint}/> : <span className="placeholder">答案要点会出现在这里</span>)}</div>
-      {!practice && state.hint && <button className="floating-expand" onClick={()=>{
+      {!practice && state.hint && state.detailAvailable!==false && <button className="floating-expand" onClick={()=>{
         if (!expanded && (!state.detail || state.detail.startsWith("原理解释失败：")) && !state.detailLoading)
           void emit("mvp_detail_request");
         setExpanded(value=>!value);
       }} aria-expanded={expanded}>{expanded ? "收起细节" : "展开细节"}</button>}
-      {!practice && expanded && state.hint && <div className="floating-detail"><MathText text={state.detailLoading ? "正在补充细节…" : state.detail || "等待补充细节…"}/></div>}
+      {!practice && expanded && state.hint && state.detailAvailable!==false && <div className="floating-detail"><MathText text={state.detailLoading ? "正在补充细节…" : state.detail || "等待补充细节…"}/></div>}
     </div>
     <div className="floating-foot"><span className="live-dot"/> {practice?"模拟练习":"面试提示"} <span>·</span> 内容仅供参考</div>
     <ResizeCorners/>
@@ -309,6 +315,7 @@ function Main() {
   const [pulling, setPulling] = useState(false);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [partial, setPartial] = useState<Segment | null>(null);
+  const [micPartial, setMicPartial] = useState<Segment|null>(null);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
@@ -329,7 +336,7 @@ function Main() {
   const [download, setDownload] = useState("");
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [decisionMs, setDecisionMs] = useState<number | null>(null);
-  const [answerSource, setAnswerSource] = useState<AnswerSource|null>(null);
+  const [answerSource, setAnswerSource] = useState<DisplaySource|null>(null);
   const [apiPending, setApiPending] = useState(false);
   const [parallelModels, setParallelModels] = useState<string[]>([]);
   const [answerMs, setAnswerMs] = useState<number | null>(null);
@@ -344,6 +351,8 @@ function Main() {
   const runningRef = useRef(false);
   const segmentsRef = useRef<Segment[]>([]);
   const partialRef = useRef<Segment | null>(null);
+  const micPartialRef = useRef<Segment|null>(null);
+  const savedIntroductionRef = useRef(false);
   const questionRef = useRef("");
   const visibleQuestionRef = useRef("");
   const visibleTermsRef = useRef<string[]>([]);
@@ -360,8 +369,9 @@ function Main() {
   const lockedRef = useRef(false);
   const pendingHintRef = useRef("");
   const pendingDisplayRef = useRef<{question:string;terms:string[];keyTerms:string[];hint:string;
-    requestId:string;startedAt:number;asrAt:number|null;source:AnswerSource}|null>(null);
+    requestId:string;startedAt:number;asrAt:number|null;source:DisplaySource}|null>(null);
   const micLastActiveRef = useRef(0);
+  const captureStartingRef = useRef(false);
   const decisionBusyRef = useRef(false);
   const decisionPendingRef = useRef<{text:string;sourceId:string;isFinal:boolean;version:number;receivedAt:number}|null>(null);
   const decisionVersionRef = useRef(0);
@@ -376,7 +386,7 @@ function Main() {
   const visibleAnswerRequestRef = useRef("");
   const detailRequestRef = useRef("");
   const answerDisplayRef = useRef<{question:string;terms:string[];keyTerms:string[];
-    transition:"first"|"new"|"revision";lastShown:string;requestId:string;startedAt:number;asrAt:number|null;source:AnswerSource}|null>(null);
+    transition:"first"|"new"|"revision";lastShown:string;requestId:string;startedAt:number;asrAt:number|null;source:DisplaySource}|null>(null);
   const transcriptScrollRef = useRef<HTMLDivElement>(null);
   const followTranscriptRef = useRef(true);
   const profileWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -501,12 +511,12 @@ function Main() {
   useEffect(() => {detailRef.current=detail;detailLoadingRef.current=detailLoading;}, [detail,detailLoading]);
   useEffect(() => {
     const container=transcriptScrollRef.current;
-    if (container && followTranscriptRef.current) container.scrollTop=segments.length || partial ? container.scrollHeight : 0;
-  }, [segments, partial, workspaceMode]);
+    if (container && followTranscriptRef.current) container.scrollTop=segments.length || partial || micPartial ? container.scrollHeight : 0;
+  }, [segments, partial, micPartial, workspaceMode]);
   useEffect(() => {
-    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading};
+    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:answerSource!=="saved"};
     void emit("mvp_ui_state", state);
-  }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading]);
+  }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, answerSource]);
 
   const refreshDevices = useCallback(async () => {
     try { setDevices(JSON.parse(await invoke<string>("list_audio_devices"))); }
@@ -854,9 +864,9 @@ function Main() {
     finally {unlisten?.();setPulling(false);}
   };
 
-  const publishHint = useCallback((value: string) => {
+  const publishHint = useCallback((value: string, immediate=false) => {
     hintRef.current = value;
-    if (lockedRef.current) pendingHintRef.current = value;
+    if (lockedRef.current && !immediate) pendingHintRef.current = value;
     else setHint(value);
   }, []);
 
@@ -871,14 +881,14 @@ function Main() {
   const showAnswerSnapshot = useCallback((display:NonNullable<typeof answerDisplayRef.current>, value:string) => {
     if (!value.trim() || display.lastShown === value) return;
     display.lastShown=value;
-    if (lockedRef.current && display.asrAt !== null) {
+    if (lockedRef.current && display.asrAt !== null && display.source!=="saved") {
       pendingDisplayRef.current={question:display.question,terms:display.terms,keyTerms:display.keyTerms,
         hint:value,requestId:display.requestId,startedAt:display.startedAt,asrAt:display.asrAt,source:display.source};
       return;
     }
     setQuestion(display.question);setUncertainTerms(display.terms);setKeyTerms(display.keyTerms);
-    setAnswerSource(display.source);
-    publishHint(value);
+    setAnswerSource(display.source);savedIntroductionRef.current=display.source==="saved";
+    publishHint(value,display.source==="saved");
     markVisible(display.requestId,display.startedAt,display.asrAt);
   }, [publishHint,markVisible]);
   const cancelAnswer = useCallback(() => {
@@ -924,7 +934,7 @@ function Main() {
     const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
       source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
     const race=new AnswerRace(requests);answerRaceRef.current=race;
-    answerStartedRef.current=performance.now();setAnswerSource(null);setApiPending(parallel);
+    answerStartedRef.current=performance.now();if(!visibleHintRef.current)setAnswerSource(null);setApiPending(parallel);
     setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
     pendingDisplayRef.current=null;pendingHintRef.current="";
@@ -953,6 +963,24 @@ function Main() {
     }));
   }, [cancelAnswer,finishAnswer,logDiagnostic]);
 
+  const showSelfIntroduction = useCallback((sourceId:string,asrAt:number|null) => {
+    cancelAnswer();savedIntroductionRef.current=true;setError("");
+    detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
+    pendingDisplayRef.current=null;pendingHintRef.current="";
+    const question="请进行自我介绍";
+    const text=settingsRef.current.selfIntroduction.trim() || "尚未保存自我介绍，请在设置 → 模型与服务 → 自我介绍中填写。";
+    const startedAt=performance.now();const requestId=crypto.randomUUID();
+    answerStartedRef.current=startedAt;answerTaskRef.current="self_introduction";
+    questionRef.current=question;activeSourceRef.current=sourceId;uncertainRef.current=[];
+    setAnswerMs(null);setVisibleMs(null);setCompleteMs(0);
+    setTranscriptToCompleteMs(asrAt===null ? null : Math.round(startedAt-asrAt));
+    answerDisplayRef.current=null;
+    showAnswerSnapshot({question,terms:[],keyTerms:[],transition:"new",lastShown:"",requestId,
+      startedAt,asrAt,source:"saved"},text);
+    setStatus(runningRef.current ? "listening" : "idle");
+    logDiagnostic("显示自我介绍","直接显示本机保存稿，未调用回答模型");
+  }, [cancelAnswer,showAnswerSnapshot,logDiagnostic]);
+
   const submitEditedQuestion = useCallback(() => {
     const corrected=questionDraft.trim();
     if (!corrected) {setError("请填写问题");return;}
@@ -969,7 +997,7 @@ function Main() {
   const loadDetail = useCallback(async () => {
     const question=visibleQuestionRef.current;
     const summary=visibleHintRef.current;
-    if (!question || !summary || detailRequestRef.current ||
+    if (savedIntroductionRef.current || !question || !summary || detailRequestRef.current ||
         (detailRef.current && !detailRef.current.startsWith("原理解释失败："))) return;
     const requestId=crypto.randomUUID();detailRequestRef.current=requestId;
     setDetail("");setDetailLoading(true);
@@ -1001,11 +1029,12 @@ function Main() {
     lastDecisionAtRef.current = Date.now(); setStatus(current => current === "generating" ? current : "deciding");
     const started = performance.now();
     try {
-      const recent = segmentsRef.current.filter(item => item.speaker !== "User" && item.id !== pending.sourceId).slice(-7)
-        .map(item => item.text).join("\n");
+      const recent=dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],
+        pending.sourceId,settingsRef.current.mode==="video");
       const decision = await invoke<Decision>("mvp_decide", {
         endpoint:endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),
         input:{ context:recent, currentText:pending.text, previousQuestion:questionRef.current,
+          candidateReply:micPartialRef.current?.text || [...segmentsRef.current].reverse().find(item=>item.speaker==="User")?.text || "",
           visibleQuestion:visibleQuestionRef.current, isFinal:pending.isFinal,
           videoMode:settingsRef.current.mode === "video",
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
@@ -1024,7 +1053,9 @@ function Main() {
       // A newer ASR increment may already be queued. The decision for this
       // snapshot can still produce an early, revisable hint; the queued text
       // is judged next. A stopped session is never allowed to update the UI.
-      if (decision.action === "show" || decision.action === "revise") {
+      if (decision.intent==="self_introduction" && (decision.action==="show" || decision.action==="revise")) {
+        if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==pending.sourceId)showSelfIntroduction(pending.sourceId,pending.receivedAt);
+      } else if (decision.action === "show" || decision.action === "revise") {
         const transition = questionTransition({hasActiveQuestion:Boolean(questionRef.current),
           activeSourceId:activeSourceRef.current,sourceId:pending.sourceId,isFinal:pending.isFinal,
           alreadyRevisedSource:revisedSourceRef.current===pending.sourceId,
@@ -1073,16 +1104,29 @@ function Main() {
       stops.push(await listen<{segment:Segment}>("transcript_update", event => {
         if (!active || !runningRef.current) return;
         const segment = event.payload.segment;
-        if (segment.speaker === "User") return;
+        if(segment.speaker==="User"){
+          if(settingsRef.current.mode!=="live" || !settingsRef.current.micTranscription)return;
+          micPartialRef.current=segment;setMicPartial(segment);return;
+        }
         partialRef.current = segment; setPartial(segment); queueDecision(segment,false);
       }));
       stops.push(await listen<{segment:Segment}>("transcript_final", event => {
         if (!active || !runningRef.current) return;
         const segment = event.payload.segment;
-        if (segment.speaker === "User") return;
-        partialRef.current = null; setPartial(null);
-        segmentsRef.current = [...segmentsRef.current.filter(item => item.id !== segment.id),segment].slice(-80);
-        setSegments(segmentsRef.current); queueDecision(segment,true);
+        if(segment.speaker==="User"){
+          if(settingsRef.current.mode!=="live" || !settingsRef.current.micTranscription)return;
+          micPartialRef.current=null;setMicPartial(null);
+        }else{partialRef.current=null;setPartial(null);}
+        segmentsRef.current=[...segmentsRef.current.filter(item=>item.id!==segment.id),segment]
+          .sort((a,b)=>a.timestamp_ms-b.timestamp_ms).slice(-80);
+        setSegments(segmentsRef.current);
+        if(segment.speaker!=="User")queueDecision(segment,true);
+      }));
+      stops.push(await listen<{party?:string;status:string;error?:string}>("stt_connection_status",event=>{
+        if(!active || (!runningRef.current && !captureStartingRef.current) || event.payload.status!=="error")return;
+        const party=event.payload.party==="You" ? "麦克风" : "面试音频";
+        setError(`${party}转录连接失败：${event.payload.error || "请检查所选识别服务"}`);
+        logDiagnostic("转录连接失败",party);
       }));
       stops.push(await listen<{source:string;level:number}>("audio_level", event => {
         if (!active) return;
@@ -1098,7 +1142,7 @@ function Main() {
             if (!speaking && pendingDisplayRef.current) {
               const display=pendingDisplayRef.current;pendingDisplayRef.current=null;
               setQuestion(display.question);setUncertainTerms(display.terms);setKeyTerms(display.keyTerms);
-              setAnswerSource(display.source);publishHint(display.hint);
+              setAnswerSource(display.source);savedIntroductionRef.current=display.source==="saved";publishHint(display.hint);
               markVisible(display.requestId,display.startedAt,display.asrAt);
             } else if (!speaking && pendingHintRef.current) {
               setHint(pendingHintRef.current);pendingHintRef.current="";
@@ -1142,7 +1186,7 @@ function Main() {
         }
         void emit("mvp_ui_state", {question:visibleQuestionRef.current,hint:visibleHintRef.current,
           status:"listening",locked:lockedRef.current,uncertainTerms:visibleTermsRef.current,
-          keyTerms:visibleKeyTermsRef.current,detail:detailRef.current,detailLoading:detailLoadingRef.current});
+          keyTerms:visibleKeyTermsRef.current,detail:detailRef.current,detailLoading:detailLoadingRef.current,detailAvailable:!savedIntroductionRef.current});
       }));
     };
     void register();
@@ -1199,12 +1243,19 @@ function Main() {
           language:"zh",temperature:0,response_format:"json",timestamp_granularities:[],
           prompt:remoteTopic,segment_duration_secs:3})});
       }
-      const you = {role:"You",device_id:settings.mic,is_input_device:true,stt_provider:"web_speech",local_model_id:null};
+      const transcribeMic=settings.mode==="live" && settings.micTranscription;
+      const you={role:"You",device_id:settings.mic,is_input_device:true,
+        stt_provider:transcribeMic ? settings.sttMode==="local" ? settings.sttEngine : settings.sttApiProvider : "web_speech",
+        local_model_id:transcribeMic && settings.sttMode==="local" ? settings.sttModel : null};
       const them = {role:"Them",device_id:settings.output,is_input_device:false,
         stt_provider:settings.sttMode === "local" ? settings.sttEngine : settings.sttApiProvider,
         local_model_id:settings.sttMode === "local" ? settings.sttModel : null};
-      await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});
-      segmentsRef.current=[];setSegments([]);setPartial(null);questionRef.current="";activeSourceRef.current="";
+      captureStartingRef.current=true;
+      try {await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});}
+      finally {captureStartingRef.current=false;}
+      segmentsRef.current=[];setSegments([]);setPartial(null);partialRef.current=null;
+      micPartialRef.current=null;setMicPartial(null);savedIntroductionRef.current=false;
+      questionRef.current="";activeSourceRef.current="";
       revisedSourceRef.current="";manualOverrideSourceRef.current="";
       answerDisplayRef.current=null;pendingDisplayRef.current=null;
       pendingHintRef.current="";answerTaskRef.current="";detailRequestRef.current="";
@@ -1221,6 +1272,8 @@ function Main() {
     decisionPendingRef.current=null;
     if (decisionTimerRef.current) clearTimeout(decisionTimerRef.current);
     cancelAnswer();answerDisplayRef.current=null;pendingDisplayRef.current=null;
+    partialRef.current=null;setPartial(null);micPartialRef.current=null;setMicPartial(null);
+    lockedRef.current=false;setLocked(false);pendingHintRef.current="";
     detailRequestRef.current="";setDetailLoading(false);
     logDiagnostic("结束聆听");
     try {await invoke("stop_capture");} catch (cause) {setError(`停止采集失败：${String(cause)}`);}
@@ -1381,21 +1434,22 @@ function Main() {
         <div className="hero-card"><div className="hero-icon"><AudioLines size={25}/></div><h1>专注听题，<br/>从容作答。</h1><p>听到面试官的问题后，自动提炼关键意图，生成可扫读的中文提示。</p>
           <div className="hero-footer"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "所选 API 会接收对应环节的数据" : "当前为本地模型模式"}</div></div>
         <div className="section-title"><span>当前模式</span><CircleHelp size={15}/></div>
-        <div className="mode-grid"><button className={settings.mode==="live"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"live"})} disabled={running}><Headphones size={19}/><strong>远程面试</strong><small>只听系统声音</small></button>
+        <div className="mode-grid"><button className={settings.mode==="live"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"live"})} disabled={running}><Headphones size={19}/><strong>远程面试</strong><small>{settings.micTranscription ? "面试音频＋我的回答" : "只听系统声音"}</small></button>
           <button className={settings.mode==="video"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"video"})} disabled={running}><MonitorPlay size={19}/><strong>视频测试</strong><small>双方同一音轨</small></button></div>
         <div className="status-card"><div className="status-top"><span>采集状态</span><span className={`status-chip ${status}`}>{statusText[status]}</span></div>
           <div className="meter-label"><Volume2 size={15}/> 面试音频 <span>{Math.round(systemLevel*100)}%</span></div><div className="meter"><i style={{width:`${systemLevel*100}%`}}/></div>
           <div className="meter-label"><Mic2 size={15}/> 我的麦克风 <span>{Math.round(micLevel*100)}%</span></div><div className="meter mic"><i style={{width:`${micLevel*100}%`}}/></div>
-          <div className="meter-foot">{locked?<><LockKeyhole size={13}/> 你正在说话，提示更新已锁定</>:"麦克风仅用于控制提示更新"}</div></div>
+          <div className="meter-foot">{locked?<><LockKeyhole size={13}/> 你正在说话，提示更新已锁定</>:settings.mode==="live" && settings.micTranscription ? "麦克风转录用于理解追问" : "麦克风仅用于控制提示更新"}</div></div>
         <div className="rail-note"><span>使用提示</span><p>播放视频时，先确认「面试音频」音量条有变化。若始终为 0，请在设置中选择视频实际使用的输出设备。</p></div>
       </section>
       <section className="transcript-panel"><div className="panel-header"><div><span className="panel-kicker">实时识别</span><h2>实时转录</h2></div><span className="panel-count">{segments.length} 条记录</span></div>
         <div className="transcript-scroll" ref={transcriptScrollRef} onScroll={event=>{
           const node=event.currentTarget;
           followTranscriptRef.current=node.scrollHeight-node.clientHeight-node.scrollTop<56;
-        }}>{segments.length===0 && !partial && <div className="empty-state"><div className="empty-icon"><ScanText size={30}/></div><h3>等待声音进入</h3><p>开始聆听后，这里会出现面试音频的增量转录。</p><span>中英文术语会保留原始识别结果</span></div>}
-          {segments.map((item,index)=><div className="utterance" key={item.id}><div className="utterance-meta"><span className="speaker-dot"/> 面试音频 <span>#{String(index+1).padStart(2,"0")}</span></div><p>{item.text}</p></div>)}
-          {partial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> 正在识别 <Activity size={13}/></div><p>{partial.text}</p></div>}
+        }}>{segments.length===0 && !partial && !micPartial && <div className="empty-state"><div className="empty-icon"><ScanText size={30}/></div><h3>等待声音进入</h3><p>开始聆听后，这里会出现面试音频的增量转录。</p><span>中英文术语会保留原始识别结果</span></div>}
+          {segments.map((item,index)=><div className="utterance" key={item.id}><div className="utterance-meta"><span className="speaker-dot"/> {item.speaker==="User" ? "我的回答" : settings.mode==="video" ? "视频音频" : "面试官"} <span>#{String(index+1).padStart(2,"0")}</span></div><p>{item.text}</p></div>)}
+          {partial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> {settings.mode==="video" ? "视频音频" : "面试官"} · 正在识别 <Activity size={13}/></div><p>{partial.text}</p></div>}
+          {micPartial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> 我的回答 · 正在识别 <Activity size={13}/></div><p>{micPartial.text}</p></div>}
           </div>
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
       </section>
@@ -1415,16 +1469,16 @@ function Main() {
               onClick={()=>{setQuestionDraft(question);setEditingQuestion(true);}}><MathText text={question || "点击输入问题，或等待转录识别…"}/></button>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
-          <div className="answer-label answer-label-space">定义与原理 <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
+          <div className="answer-label answer-label-space">{answerSource==="saved" ? "自我介绍稿" : "定义与原理"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
           <div className="answer-card">{hint?<div className="answer-text"><MathText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
-          {hint && <button className="detail-btn" onClick={()=>{
+          {hint && answerSource!=="saved" && <button className="detail-btn" onClick={()=>{
             if (!showDetail && (!detail || detail.startsWith("原理解释失败：")) && !detailLoading) void loadDetail();
             setShowDetail(!showDetail);
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
-          {showDetail && hint && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
+          {showDetail && hint && answerSource!=="saved" && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           {error && <div className="error-box">{error}</div>}</div>
-        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
+        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? "已保存的自我介绍" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
       </section>
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
@@ -1472,7 +1526,9 @@ function Main() {
         <div className="setting-group"><div className="setting-heading"><Headphones size={18}/> 音频设备 <button className="text-link" onClick={()=>void refreshDevices()}>刷新</button></div>
         <label>面试音频输出设备<select value={settings.output} onChange={e=>update({output:e.target.value})} disabled={running}><option value="default">系统默认输出</option>{devices.outputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>我的麦克风<select value={settings.mic} onChange={e=>update({mic:e.target.value})} disabled={running}><option value="default">系统默认麦克风</option>{devices.inputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <p className="setting-help">麦克风仅控制提示窗锁定；视频测试模式不使用麦克风锁定。</p></div>
+        <label className="connection-sharing"><input type="checkbox" checked={settings.micTranscription} disabled={running || practiceActive}
+            onChange={e=>update({micTranscription:e.target.checked})}/><span>转录我的回答，用于理解追问（远程面试）</span></label>
+          <p className="setting-help">麦克风与系统音频使用所选识别服务，分别标记角色。你的回答仅提供上下文，面试官的发言触发判别。双路会增加本机资源或 API 用量；语音 API 会收到麦克风声音，判别 API 会收到相关对话文本。视频测试沿用视频单音轨。</p></div>
         </>}
         {settingsTab === "models" && <>
         <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 配置保存与备份</div>
@@ -1536,7 +1592,7 @@ function Main() {
             disabled={running || practiceActive || testingModel!==null || linkingModels}
             onChange={e=>void toggleSharedModels(e.target.checked)}/><span>判别与回答共用连接（推荐）</span></label>
           <p className="setting-help">{linkingModels ? "正在切换连接设置…" : settings.sharedModelConnection
-            ? "只需设置一次服务、密钥和模型。练习出题与评价也使用这份连接。"
+            ? "只需设置一次服务、密钥和模型。练习出题与评价也使用这份连接。复杂追问及术语纠偏依赖判别模型能力；本地小模型不稳定时，可选择更强的 API 模型。"
             : "分别配置不同服务或模型。已有配置已保留；开启共用后采用回答生成的连接，关闭后恢复原判别配置。"}</p></div>
         {!settings.sharedModelConnection && stageEditor("decision","语义判别",decisionChoices,decisionReady)}
         {stageEditor("answer",settings.sharedModelConnection ? "共用模型连接" : "回答生成",answerChoices,answerReady)}
@@ -1580,6 +1636,12 @@ function Main() {
           {pullProgress && <p className="setting-help" role="status">{pullProgress}</p>}
           <p className="setting-help">下载完成后，在下方判别和回答设置中选择该模型。模型文件可能占用数 GB；API 模式无需安装 Ollama。</p>
         </div>}
+        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 自我介绍</div>
+          <label>自我介绍稿（自动保存）<textarea aria-label="自我介绍稿" value={settings.selfIntroduction} maxLength={4000} rows={7}
+            placeholder="粘贴你准备好的自我介绍。请填写真实经历；可按教育背景、研究或项目、岗位匹配度组织。"
+            onChange={e=>update({selfIntroduction:e.target.value})}/></label>
+          <p className="setting-help">面试官要求你进行自我介绍时，直接在提示区显示这份稿子。保存稿不交给模型改写，也不加入其他问题的生成上下文。留空时提示你填写，最多 4000 字。</p>
+        </div>
         <div className="setting-group"><div className="setting-heading"><Pencil size={18}/> 回答要求</div>
           <p className="setting-help">自定义回答的表达方式、简短程度和关注方向；只影响后续回答及“展开细节”。留空使用内置要求。</p>
           <label>给回答模型的附加要求<textarea value={settings.answerInstructions} maxLength={1200} rows={7}
