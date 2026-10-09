@@ -115,7 +115,7 @@ pub fn run() {
                 .unwrap_or_else(|| app.path().app_data_dir().expect("Failed to resolve app data directory"));
             std::fs::create_dir_all(&app_data_dir)
                 .expect("Failed to create app data directory");
-            // Apply a previously enabled capture setting before the UI begins normal work.
+            // Enable capture exclusion on every launch before the UI begins normal work.
             stealth_commands::restore_capture_on_startup(app.handle());
             for label in ["launcher", "overlay"] {
                 if let Some(window) = app.get_webview_window(label) {

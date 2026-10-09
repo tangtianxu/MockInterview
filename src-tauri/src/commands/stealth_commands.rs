@@ -151,17 +151,14 @@ mod native {
 }
 
 pub fn restore_capture_on_startup(app: &AppHandle) {
-    if !saved(app).capture_exclusion { return; }
-    #[cfg(windows)]
-    for label in ["launcher", "overlay"] {
-        if let Err(error) = native::capture(app, label, true) {
-            log::error!("Privacy display startup: {error}");
-            record_error(app, Some(&error));
-            for label in ["launcher", "overlay"] { let _ = native::capture(app, label, false); }
-            let mut config = saved(app);
-            config.capture_exclusion = false;
-            let _ = save(app, &config);
-            return;
+    // Each launch starts protected, independently of the previous session's switches.
+    // Reuse the runtime path so startup has the same verification and rollback.
+    if let Err(error) = set_capture_exclusion(app.clone(), true) {
+        log::error!("Privacy display startup: {error}");
+        let mut config = saved(app);
+        config.capture_exclusion = false;
+        if let Err(error) = save(app, &config) {
+            log::error!("Privacy display startup preference: {error}");
         }
     }
 }

@@ -516,9 +516,6 @@ function Main() {
   }, []);
   useEffect(() => {
     let active=true;
-    void invoke<PrivacyDisplayState>("get_privacy_display_state").then(state=>{
-      if (active) {setPrivacy(state);if(state.errors.length)setPrivacyError(state.errors.join("；"));}
-    }).catch(cause=>{if(active)setPrivacyError(`读取隐私显示状态失败：${String(cause)}`);});
     const restore = (event: {state:string})=>{
       if(event.state!=="Pressed")return;
       void invoke<PrivacyDisplayState>("set_taskbar_hidden",{enabled:false}).then(state=>{
@@ -529,6 +526,13 @@ function Main() {
     };
     let registered="";
     void (async()=>{
+      try {
+        const state=await invoke<PrivacyDisplayState>("get_privacy_display_state");
+        if(!active)return;
+        setPrivacy(state);
+        if(state.errors.length)setPrivacyError(state.errors.join("；"));
+      } catch(cause){if(active)setPrivacyError(`读取隐私显示状态失败：${String(cause)}`);}
+      if(!active)return;
       const errors:string[]=[];
       for(const shortcut of ["Control+Shift+Backquote","Control+Alt+Shift+F12"]){
         try {
@@ -541,9 +545,19 @@ function Main() {
           setRestoreShortcutLabel(shortcutLabel(shortcut));
           setRestoreReady(true);
           try {
-            const wanted=await invoke<boolean>("get_saved_taskbar_preference");
-            if(wanted && active)setPrivacy(await invoke<PrivacyDisplayState>("set_taskbar_hidden",{enabled:true}));
-          } catch(cause){setPrivacyError(`恢复任务栏隐藏设置失败：${String(cause)}`);}
+            const state=await invoke<PrivacyDisplayState>("set_taskbar_hidden",{enabled:true});
+            if(!active)return;
+            setPrivacy(state);
+            if(state.errors.length)setPrivacyError(state.errors.join("；"));
+          } catch(cause){
+            if(!active)return;
+            setPrivacyError(current=>[current,`启动任务栏隐藏失败：${String(cause)}`].filter(Boolean).join("；"));
+            logDiagnostic("启动任务栏隐藏失败",String(cause));
+            try {
+              const state=await invoke<PrivacyDisplayState>("get_privacy_display_state");
+              if(active)setPrivacy(state);
+            } catch { /* Keep last observed state. */ }
+          }
           return;
         } catch(cause){errors.push(`${shortcutLabel(shortcut)}：${String(cause)}`);}
       }
@@ -1385,7 +1399,7 @@ function Main() {
       <div className="drawer-scroll" key={settingsTab}>
         {settingsTab === "display" && <>
         <div className="setting-group"><div className="setting-heading"><LockKeyhole size={18}/> 隐私与显示</div>
-          <p className="setting-help">要在共享屏幕时去掉本软件的任务栏图标，请选“两项都开启”。录屏排除只作用于软件窗口，任务栏图标需另行隐藏；隐藏后本机任务栏也不显示该图标。实际共享效果需验证。</p>
+          <p className="setting-help">每次启动默认开启“录屏排除”和“隐藏任务栏”，本次关闭后，下次启动会重新开启。任务栏隐藏需恢复快捷键可用；隐藏后本机任务栏也不显示该图标。录屏排除仅对支持 Windows 排除机制的捕获方式有效，实际共享效果需验证。</p>
           <div className="privacy-presets">
             {([['普通模式',false,false],['录屏排除',true,false],['隐藏任务栏',false,true],['两项都开启',true,true]] as const).map(([name,capture,taskbar])=><button key={name}
               className={captureExcluded===capture && taskbarHidden===taskbar ? "privacy-preset selected" : "privacy-preset"}
