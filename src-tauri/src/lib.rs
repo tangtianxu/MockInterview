@@ -105,6 +105,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater_commands::UpdateState::default())
         .setup(|app| {
             let mut app_state = AppState::new();
 
@@ -610,8 +612,8 @@ pub fn run() {
             translation_model_commands::activate_opus_mt_model,
             // == COMMANDS: updater ==
             updater_commands::check_for_update,
-            updater_commands::download_and_install_update,
-            updater_commands::restart_for_update,
+            updater_commands::download_update,
+            updater_commands::install_downloaded_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexQ");

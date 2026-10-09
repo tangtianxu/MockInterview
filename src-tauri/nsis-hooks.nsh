@@ -42,6 +42,21 @@
   !insertmacro RemoveLegacyShortcut "$SMPROGRAMS" "模拟面试练习"
   !insertmacro RemoveLegacyShortcut "$DESKTOP" "模拟面试练习"
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "MockInterview"
+  ; Automatic updates should retain the familiar Chinese shortcut name.
+  !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $4
+  ${If} $4 = 1
+    Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+    CreateShortcut "$SMPROGRAMS\模拟面试练习.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\模拟面试练习.lnk"
+  ${EndIf}
+  !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  Pop $4
+  ${If} $4 = 1
+    Delete "$DESKTOP\${PRODUCTNAME}.lnk"
+    CreateShortcut "$DESKTOP\模拟面试练习.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$DESKTOP\模拟面试练习.lnk"
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

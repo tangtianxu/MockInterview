@@ -8,4 +8,7 @@ src-tauri/examples/
 src-tauri/.tauri-private-key.pub
 *.log
 .env
+*.key
+*.pem
+__pycache__/
 src-tauri/runtime/

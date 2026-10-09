@@ -12,8 +12,10 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
 import { dialogueContext } from "./dialogueContext";
+import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
+import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
@@ -262,6 +264,7 @@ function Main() {
   const [practiceSetupVisible,setPracticeSetupVisible] = useState(true);
   const [practiceFeedbackVisible,setPracticeFeedbackVisible] = useState(true);
   const [practiceActive, setPracticeActive] = useState(false);
+  const [practiceWorking,setPracticeWorking] = useState(false);
   const [practicePreview,setPracticePreview] = useState<PracticePreview>({question:"",hint:"设置练习范围后开始。"});
   const [switchNotice, setSwitchNotice] = useState("");
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -331,7 +334,7 @@ function Main() {
   const [systemLevel, setSystemLevel] = useState(0);
   const [locked, setLocked] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"display" | "audio" | "models" | "diagnostics">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "audio" | "profile" | "models" | "updates" | "diagnostics">("display");
   const [showDetail, setShowDetail] = useState(false);
   const [download, setDownload] = useState("");
   const [overlayVisible, setOverlayVisible] = useState(false);
@@ -401,6 +404,7 @@ function Main() {
         if(profile.practiceConfig)localStorage.setItem("interviewCue.practiceConfig",JSON.stringify(profile.practiceConfig));
         if(profile.resumeAnalysis) localStorage.setItem("interviewCue.resumeAnalysis",JSON.stringify(profile.resumeAnalysis));
         else localStorage.removeItem("interviewCue.resumeAnalysis");
+        settingsRef.current=restored;connectionEpochRef.current++;
         setSettings(restored);
       }
       setProfileEpoch(value=>value+1);
@@ -424,6 +428,16 @@ function Main() {
     },350);
     return()=>window.clearTimeout(timer);
   },[settings,resumeAnalysis,practiceConfigEpoch,profileReady]);
+  const updateBlocked=running || practiceActive || practiceWorking || !profileReady ||
+    startingService || testingModel!==null || linkingModels || !!download || pulling ||
+    status==="deciding" || status==="generating" || detailLoading;
+  const updater=useSoftwareUpdate(updateBlocked,async()=>{
+    // Flush the newest profile even if its normal save debounce has not fired yet.
+    const profile:SavedProfile={settings:settingsRef.current,resumeAnalysis:savedResumeAnalysis(),practiceConfig:savedPracticeConfig()};
+    const save=profileWriteQueueRef.current.catch(()=>{}).then(()=>invoke("save_interview_profile",{profile}));
+    profileWriteQueueRef.current=save;await save;
+  });
+  const softwareUpdatingRef=useRef(false);softwareUpdatingRef.current=updater.busy;
   const onPracticeConfigChange=useCallback(()=>setPracticeConfigEpoch(value=>value+1),[]);
   useEffect(() => {
     workspaceModeRef.current=workspaceMode;practicePreviewRef.current=practicePreview;
@@ -730,6 +744,7 @@ function Main() {
     } catch (cause) { setError(`选择语音模型目录失败：${String(cause)}`); }
   };
   useEffect(() => {
+    if(!profileReady)return;
     if(settings.sharedModelConnection)return;
     const config=settings.decision;
     if (!config.baseUrl) return;
@@ -742,8 +757,9 @@ function Main() {
       if (present) void refreshModels("decision",true);
     }).catch(()=>{});
     return ()=>{active=false;};
-  }, [settings.decision.api,settings.decision.baseUrl,settings.sharedModelConnection,refreshModels]);
+  }, [profileReady,settings.decision.api,settings.decision.baseUrl,settings.sharedModelConnection,refreshModels]);
   useEffect(() => {
+    if(!profileReady)return;
     const config=settings.answer;
     if (!config.baseUrl) return;
     if (config.api === "ollama") {void refreshModels("answer",true);return;}
@@ -755,7 +771,7 @@ function Main() {
       if (present) void refreshModels("answer",true);
     }).catch(()=>{});
     return ()=>{active=false;};
-  }, [settings.answer.api,settings.answer.baseUrl,refreshModels]);
+  }, [profileReady,settings.answer.api,settings.answer.baseUrl,refreshModels]);
   const saveKey = async (slot: string, stage?: "decision" | "answer") => {
     const key = keyDrafts[slot]?.trim();
     if (!key) return;
@@ -926,6 +942,7 @@ function Main() {
 
   const startAnswer = useCallback(async (nextQuestion: string, focus: string[], keyTerms: string[],
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
+    if(softwareUpdatingRef.current)return;
     cancelAnswer();
     const settings=settingsRef.current;
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
@@ -968,7 +985,7 @@ function Main() {
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
     pendingDisplayRef.current=null;pendingHintRef.current="";
     const question="请进行自我介绍";
-    const text=settingsRef.current.selfIntroduction.trim() || "尚未保存自我介绍，请在设置 → 模型与服务 → 自我介绍中填写。";
+    const text=settingsRef.current.selfIntroduction.trim() || "尚未保存自我介绍，请在设置 → 个人资料 → 自我介绍中填写。";
     const startedAt=performance.now();const requestId=crypto.randomUUID();
     answerStartedRef.current=startedAt;answerTaskRef.current="self_introduction";
     questionRef.current=question;activeSourceRef.current=sourceId;uncertainRef.current=[];
@@ -982,22 +999,26 @@ function Main() {
   }, [cancelAnswer,showAnswerSnapshot,logDiagnostic]);
 
   const submitEditedQuestion = useCallback(() => {
+    if(updater.busy)return;
     const corrected=questionDraft.trim();
     if (!corrected) {setError("请填写问题");return;}
     setEditingQuestion(false);setError("");setDecisionMs(null);
     manualOverrideSourceRef.current=activeSourceRef.current;
+    if(isSelfIntroductionRequest(corrected)){
+      showSelfIntroduction(`manual-introduction-${crypto.randomUUID()}`,null);return;
+    }
     pendingHintRef.current="";pendingDisplayRef.current=null;
     hintRef.current="";visibleHintRef.current="";setHint("");
     visibleQuestionRef.current=corrected;setQuestion(corrected);
     setUncertainTerms([]);setKeyTerms([]);
     logDiagnostic("手动修正问题",`已提交 ${corrected.length} 字，重新生成回答`);
     void startAnswer(corrected,[],[],[],[],"new",null);
-  }, [questionDraft,startAnswer,logDiagnostic]);
+  }, [questionDraft,startAnswer,showSelfIntroduction,logDiagnostic,updater.busy]);
 
   const loadDetail = useCallback(async () => {
     const question=visibleQuestionRef.current;
     const summary=visibleHintRef.current;
-    if (savedIntroductionRef.current || !question || !summary || detailRequestRef.current ||
+    if (softwareUpdatingRef.current || savedIntroductionRef.current || !question || !summary || detailRequestRef.current ||
         (detailRef.current && !detailRef.current.startsWith("原理解释失败："))) return;
     const requestId=crypto.randomUUID();detailRequestRef.current=requestId;
     setDetail("");setDetailLoading(true);
@@ -1029,6 +1050,13 @@ function Main() {
     lastDecisionAtRef.current = Date.now(); setStatus(current => current === "generating" ? current : "deciding");
     const started = performance.now();
     try {
+      if(isSelfIntroductionRequest(pending.text)){
+        if(manualOverrideSourceRef.current && pending.sourceId===manualOverrideSourceRef.current)return;
+        setDecisionMs(Math.round(performance.now()-started));
+        if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==pending.sourceId)
+          showSelfIntroduction(pending.sourceId,pending.receivedAt);
+        return;
+      }
       const recent=dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],
         pending.sourceId,settingsRef.current.mode==="video");
       const decision = await invoke<Decision>("mvp_decide", {
@@ -1204,6 +1232,7 @@ function Main() {
   };
 
   const start = async () => {
+    if(updater.busy)return;
     setError("");
     if (settings.sttMode === "local" && !chosenModel?.is_downloaded) {setShowSettings(true);setError("请先下载所选语音模型");return;}
     if (settings.sttMode === "api" && !savedKeys[settings.sttApiProvider]) {setShowSettings(true);setError("请先保存语音识别 API 密钥");return;}
@@ -1378,10 +1407,10 @@ function Main() {
       <div className="brand">
         <div className="brand-mark" role="button" tabIndex={0} title="双击切换练习与实时提示页面"
           aria-label="双击切换练习与实时提示页面" onDoubleClick={()=>{
-            if (running || practiceActive) {setSwitchNotice("请先结束当前练习");return;}
+            if (running || practiceActive || updater.busy) {setSwitchNotice("请先结束当前操作");return;}
             setSwitchNotice("");setWorkspaceMode(value=>value==="practice"?"assist":"practice");
           }}
-          onKeyDown={event=>{if(event.key==="Enter" && !running && !practiceActive)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
+          onKeyDown={event=>{if(event.key==="Enter" && !running && !practiceActive && !updater.busy)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
         <div><strong>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
           <span>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
       <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : (settings.sharedModelConnection ? answerReady : decisionReady && answerReady) ? "本地模型已连接" : "本地模型未连接"}</span>
@@ -1406,7 +1435,7 @@ function Main() {
           <Pin size={16}/> {settings.launcherOnTop ? "取消置顶" : "窗口置顶"}</button>
         <button className="ghost-btn" onClick={() => void toggleOverlay()}><MonitorPlay size={17}/> {overlayVisible?"隐藏悬浮窗":"显示悬浮窗"}</button>
         {workspaceMode==="assist" && <>
-        <button className={running?"stop-btn":"start-btn"} onClick={() => void (running?stop():start())} disabled={startingService}>
+        <button className={running?"stop-btn":"start-btn"} onClick={() => void (running?stop():start())} disabled={startingService || updater.busy}>
           {running?<><Square size={14} fill="currentColor"/> 结束练习</>:startingService?"连接本地模型…":<><Play size={15} fill="currentColor"/> 开始聆听</>}
         </button>
         </>}
@@ -1419,7 +1448,7 @@ function Main() {
     </header>
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
-      onSessionActiveChange={setPracticeActive}
+      onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy}
       onPreviewChange={setPracticePreview}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
@@ -1482,13 +1511,13 @@ function Main() {
       </section>
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
-      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",models:"模型与服务",diagnostics:"诊断日志"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
+      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
       <nav className="settings-tabs" role="tablist" aria-label="设置分类">
-        {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["models","模型与服务",Sparkles], ["diagnostics","诊断日志",Activity] ] as const).map(([tab,label,Icon])=><button
+        {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["profile","个人资料",FileText], ["models","模型与服务",Sparkles], ["updates","软件更新",RefreshCw], ["diagnostics","诊断日志",Activity] ] as const).map(([tab,label,Icon])=><button
           key={tab} role="tab" aria-selected={settingsTab===tab} className={settingsTab===tab?"settings-tab selected":"settings-tab"}
           onClick={()=>{setSettingsTab(tab);setRecordingQuitShortcut(false);setQuitShortcutDraft("");}}><Icon size={15}/><span>{label}</span></button>)}
       </nav>
-      <div className="drawer-scroll" key={settingsTab}>
+      <div className="drawer-scroll" key={settingsTab}><fieldset className="settings-fields" disabled={updater.busy && settingsTab!=="updates"}>
         {settingsTab === "display" && <>
         <div className="setting-group"><div className="setting-heading"><LockKeyhole size={18}/> 隐私与显示</div>
           <p className="setting-help">每次启动默认开启“录屏排除”和“隐藏任务栏”，本次关闭后，下次启动会重新开启。任务栏隐藏需恢复快捷键可用；隐藏后本机任务栏也不显示该图标。录屏排除仅对支持 Windows 排除机制的捕获方式有效，实际共享效果需验证。</p>
@@ -1530,18 +1559,8 @@ function Main() {
             onChange={e=>update({micTranscription:e.target.checked})}/><span>转录我的回答，用于理解追问（远程面试）</span></label>
           <p className="setting-help">麦克风与系统音频使用所选识别服务，分别标记角色。你的回答仅提供上下文，面试官的发言触发判别。双路会增加本机资源或 API 用量；语音 API 会收到麦克风声音，判别 API 会收到相关对话文本。视频测试沿用视频单音轨。</p></div>
         </>}
-        {settingsTab === "models" && <>
-        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 配置保存与备份</div>
-          <p className="setting-help">模型选择、接口地址、个人资料、简历路径和已完成的简历分析会自动保存到本机配置文件，更新同一应用后继续读取。</p>
-          <div className="setup-actions"><button className="download-btn" disabled={!profileReady || running || practiceActive}
-            onClick={()=>void exportProfile()}>导出配置文件</button>
-            <button className="download-btn" disabled={!profileReady || running || practiceActive}
-              onClick={()=>void importProfile()}>从文件导入</button></div>
-          <p className="setting-help">备份包含资料和简历分析，请妥善保管。API 密钥由 Windows 凭据管理器单独保存，不写入备份；简历原文件也不会复制进去。</p>
-          {profileNotice && <p className="setting-help" role="status">{profileNotice}</p>}
-          {profileError && <div className="error-box" role="alert">{profileError}</div>}
-        </div>
-        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 两个模式共用的面试背景</div>
+        {settingsTab === "profile" && <>
+        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 面试背景</div>
           <label>目标岗位（可选）<input value={settings.targetRole} maxLength={120} disabled={running || practiceActive}
             placeholder="如：算法工程师" onChange={event=>update({targetRole:event.target.value})}/></label>
           <label>关注主题（可选）<input value={settings.focusTopics} maxLength={300} disabled={running || practiceActive}
@@ -1554,6 +1573,38 @@ function Main() {
           {resumeError && <p className="setting-help" role="alert">{resumeError}</p>}
           <p className="setting-help">简历原文不用于实时技术题答案。外部判别、回答及语音 API 默认不会收到简历提取内容。</p>
         </div>
+        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 领域背景</div>
+          <label>技术背景<select value={settings.domain} onChange={e=>update({domain:e.target.value as Settings["domain"]})} disabled={running}>
+            <option value="general">通用技术</option><option value="ai">人工智能</option><option value="communication">通信与网络</option></select></label>
+          <p className="setting-help">背景目前仅作为 Whisper.cpp 和 Groq 的短提示，不作为回答事实；Deepgram 暂不使用该选项。Groq 按音频段返回，实时性可能弱于流式服务；语音 API 会收到面试音频。</p>
+        </div>
+        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 自我介绍</div>
+          <label>自我介绍稿（自动保存）<textarea aria-label="自我介绍稿" value={settings.selfIntroduction} maxLength={4000} rows={7}
+            placeholder="粘贴你准备好的自我介绍。请填写真实经历；可按教育背景、研究或项目、岗位匹配度组织。"
+            onChange={e=>update({selfIntroduction:e.target.value})}/></label>
+          <p className="setting-help">面试官要求你进行自我介绍时，直接在提示区显示这份稿子。保存稿不交给模型改写，也不加入其他问题的生成上下文。留空时提示你填写，最多 4000 字。</p>
+        </div>
+        <div className="setting-group"><div className="setting-heading"><Pencil size={18}/> 回答要求</div>
+          <p className="setting-help">自定义回答的表达方式、简短程度和关注方向；只影响后续回答及“展开细节”。留空使用内置要求。</p>
+          <label>给回答模型的附加要求<textarea value={settings.answerInstructions} maxLength={1200} rows={7}
+            onChange={event=>update({answerInstructions:event.target.value})}
+            placeholder={ANSWER_PROMPT_EXAMPLE}/></label>
+          <div className="setup-actions"><button className="download-btn" onClick={()=>update({answerInstructions:ANSWER_PROMPT_EXAMPLE})}>填入示例（覆盖当前内容）</button>
+            <button className="download-btn" disabled={!settings.answerInstructions} onClick={()=>update({answerInstructions:""})}>清空，使用内置要求</button></div>
+          <p className="setting-help">示例中的“XX”请改成你的方向。个人背景只用于调整讲解重点，不作为项目经历的事实依据。若回答模型使用云端 API，这段要求也会发送给对应服务。</p>
+        </div>
+        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 配置保存与备份</div>
+          <p className="setting-help">模型选择、接口地址、个人资料、简历路径和已完成的简历分析会自动保存到本机配置文件，更新同一应用后继续读取。</p>
+          <div className="setup-actions"><button className="download-btn" disabled={!profileReady || running || practiceActive}
+            onClick={()=>void exportProfile()}>导出配置文件</button>
+            <button className="download-btn" disabled={!profileReady || running || practiceActive}
+              onClick={()=>void importProfile()}>从文件导入</button></div>
+          <p className="setting-help">备份包含资料和简历分析，请妥善保管。API 密钥由 Windows 凭据管理器单独保存，不写入备份；简历原文件也不会复制进去。</p>
+          {profileNotice && <p className="setting-help" role="status">{profileNotice}</p>}
+          {profileError && <div className="error-box" role="alert">{profileError}</div>}
+        </div>
+        </>}
+        {settingsTab === "models" && <>
         <div className="setting-group"><div className="setting-heading"><ScanText size={18}/> 语音识别</div>
           <label>运行方式<select value={settings.sttMode} onChange={e=>update({sttMode:e.target.value as SttMode})} disabled={running}>
             <option value="local">本地模型</option><option value="api">语音识别 API</option></select></label>
@@ -1584,9 +1635,7 @@ function Main() {
               <div className="key-actions"><button onClick={()=>void saveKey(settings.sttApiProvider)} disabled={!keyDrafts[settings.sttApiProvider]?.trim() || running}>保存密钥</button>
                 {savedKeys[settings.sttApiProvider] && <button onClick={()=>void removeKey(settings.sttApiProvider)} disabled={running}>删除已存密钥</button>}</div></div>
           </>}
-          <label>技术背景<select value={settings.domain} onChange={e=>update({domain:e.target.value as Settings["domain"]})} disabled={running}>
-            <option value="general">通用技术</option><option value="ai">人工智能</option><option value="communication">通信与网络</option></select></label>
-          <p className="setting-help">背景目前仅作为 Whisper.cpp 和 Groq 的短提示，不作为回答事实；Deepgram 暂不使用该选项。Groq 按音频段返回，实时性可能弱于流式服务；语音 API 会收到面试音频。</p></div>
+</div>
         <div className="setting-group"><div className="setting-heading"><Sparkles size={18}/> 模型连接方式</div>
           <label className="connection-sharing"><input type="checkbox" checked={settings.sharedModelConnection}
             disabled={running || practiceActive || testingModel!==null || linkingModels}
@@ -1636,21 +1685,6 @@ function Main() {
           {pullProgress && <p className="setting-help" role="status">{pullProgress}</p>}
           <p className="setting-help">下载完成后，在下方判别和回答设置中选择该模型。模型文件可能占用数 GB；API 模式无需安装 Ollama。</p>
         </div>}
-        <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 自我介绍</div>
-          <label>自我介绍稿（自动保存）<textarea aria-label="自我介绍稿" value={settings.selfIntroduction} maxLength={4000} rows={7}
-            placeholder="粘贴你准备好的自我介绍。请填写真实经历；可按教育背景、研究或项目、岗位匹配度组织。"
-            onChange={e=>update({selfIntroduction:e.target.value})}/></label>
-          <p className="setting-help">面试官要求你进行自我介绍时，直接在提示区显示这份稿子。保存稿不交给模型改写，也不加入其他问题的生成上下文。留空时提示你填写，最多 4000 字。</p>
-        </div>
-        <div className="setting-group"><div className="setting-heading"><Pencil size={18}/> 回答要求</div>
-          <p className="setting-help">自定义回答的表达方式、简短程度和关注方向；只影响后续回答及“展开细节”。留空使用内置要求。</p>
-          <label>给回答模型的附加要求<textarea value={settings.answerInstructions} maxLength={1200} rows={7}
-            onChange={event=>update({answerInstructions:event.target.value})}
-            placeholder={ANSWER_PROMPT_EXAMPLE}/></label>
-          <div className="setup-actions"><button className="download-btn" onClick={()=>update({answerInstructions:ANSWER_PROMPT_EXAMPLE})}>填入示例（覆盖当前内容）</button>
-            <button className="download-btn" disabled={!settings.answerInstructions} onClick={()=>update({answerInstructions:""})}>清空，使用内置要求</button></div>
-          <p className="setting-help">示例中的“XX”请改成你的方向。个人背景只用于调整讲解重点，不作为项目经历的事实依据。若回答模型使用云端 API，这段要求也会发送给对应服务。</p>
-        </div>
         </>}
         {settingsTab === "display" &&
         <div className="setting-group"><div className="setting-heading"><Pin size={18}/> 窗口与快捷键</div>
@@ -1679,6 +1713,7 @@ function Main() {
           <p className="setting-help">默认 Ctrl + `。录入时同时按 Ctrl、Alt 或 Shift 与字母、数字、F1–F12 或 ` 键；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
         </div>}
+        {settingsTab === "updates" && <SoftwareUpdate version={version} blocked={updateBlocked} updater={updater}/>}
         {settingsTab === "diagnostics" &&
         <div className="setting-group"><div className="setting-heading"><Activity size={18}/> 诊断日志</div>
           <p className="setting-help">仅保存在本机，最多保留最近 80 条状态与耗时；不记录音频、转录内容或 API 密钥。</p>
@@ -1691,7 +1726,7 @@ function Main() {
               <button disabled={!diagnostics.length} onClick={()=>setDiagnostics([])}>清除日志</button></div>
           </details>
         </div>}
-      </div><div className="drawer-foot"><button className="start-btn wide" onClick={()=>setShowSettings(false)}>完成设置</button></div>
+      </fieldset></div><div className="drawer-foot"><button className="start-btn wide" onClick={()=>setShowSettings(false)}>完成设置</button></div>
     </aside></div>}
     <ResizeCorners/>
   </div>;

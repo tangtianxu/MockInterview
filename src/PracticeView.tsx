@@ -38,14 +38,14 @@ function minutesLabel(seconds: number) {
 
 export function PracticeView({model, domain, liveRunning, stt, personalization, onSessionActiveChange,
   resume, analysis, onResumeImported, onAnalysis, onClearResume, role, topics, onRoleChange, onTopicsChange,
-  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0}: {model: ModelEndpoint; domain: string;
+  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false}: {model: ModelEndpoint; domain: string;
   liveRunning: boolean; stt: SttSettings; personalization?: string; onSessionActiveChange?: (active:boolean)=>void;
   resume: Resume|null; analysis: Analysis|null; onResumeImported:(path:string,resume:Resume)=>void;
   onAnalysis:(analysis:Analysis)=>void; onClearResume:()=>void; role:string; topics:string;
   onRoleChange:(value:string)=>void; onTopicsChange:(value:string)=>void;
   setupVisible?:boolean; feedbackVisible?:boolean; resumePath?:string; resumeError?:string;
   onPreviewChange?:(preview:{question:string;hint:string})=>void;
-  onConfigChange?:()=>void;profileEpoch?:number}) {
+  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void}) {
   const [config, setConfig] = useState<PracticeConfig>(loadConfig);
   const [question, setQuestion] = useState<Question | null>(null);
   const [draft, setDraft] = useState("");
@@ -71,6 +71,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   useEffect(() => {localStorage.setItem("interviewCue.practiceConfig",JSON.stringify(config));onConfigChange?.();},[config,onConfigChange]);
   useEffect(() => {if(profileEpoch)setConfig(loadConfig());},[profileEpoch]);
   useEffect(() => {onSessionActiveChange?.(active);},[active,onSessionActiveChange]);
+  useEffect(()=>{onWorkActiveChange?.(active || !!busy || micOn || reference.loading);},[active,busy,micOn,reference.loading,onWorkActiveChange]);
+  useEffect(()=>()=>onWorkActiveChange?.(false),[onWorkActiveChange]);
   useEffect(() => {
     const hint=feedback ? reference.text || `参考评分 ${feedback.score}/5。${(feedback.missingPoints || []).slice(0,2).map(item=>item.explanation).join(" ") || (feedback.missing || []).slice(0,2).map(code=>aspects[code]).filter(Boolean).join(" ")}` :
       active ? "请先口头回答；提交后查看复盘。" : "设置练习范围后开始。";
@@ -106,6 +108,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     }});
   };
   const importResume = async () => {
+    if(updating)return;
     const path = await choosePath({multiple:false,directory:false,filters:[{name:"简历",extensions:["pdf","docx","txt","md"]}]});
     if (typeof path !== "string") return;
     setBusy("resume");setError("");
@@ -114,6 +117,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     finally {setBusy(null);}
   };
   const analyzeResume = async () => {
+    if(updating)return;
     if (!resume) return;
     setBusy("analyze");setError("");
     try {const value = await request("analyze",{resumeText:resume.text,resumeAnalysis:""});onAnalysis(value as Analysis);}
@@ -131,7 +135,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     setReference({text:"",loading:false,error:""});
   };
   const generateReference=async (currentQuestion:Question,turnId:string,epoch=sessionEpochRef.current)=>{
-    if(referenceRequestRef.current)return;
+    if(updating || referenceRequestRef.current)return;
     const current={id:`practice-reference-${crypto.randomUUID()}`,turnId,text:""};
     referenceRequestRef.current=current;
     const stillCurrent=()=>referenceRequestRef.current===current && sessionEpochRef.current===epoch;
@@ -195,6 +199,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     finally {if(operationRef.current.finish(token))setBusy(null);}
   };
   const start = async () => {
+    if(updating)return;
     if(operationRef.current.busy)return;
     if (liveRunning) {setError("请先结束实时聆听，再开始模拟练习。");return;}
     if (config.scope !== "technical" && !analysis) {setError("项目、混合或综合练习需要先导入并分析简历。");return;}
@@ -233,6 +238,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     finally {for (const stop of unlistenRef.current.splice(0)) stop();setPartialSpeech("");}
   };
   const startMic = async () => {
+    if(updating)return;
     if (liveRunning || micOnRef.current || !question || feedback) return;
     setError("");seenSegmentsRef.current.clear();setPartialSpeech("");
     try {
@@ -299,11 +305,11 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       <div className="practice-options">
         <h2>简历背景 <span>可选</span></h2>
         <p>支持 PDF、DOCX、TXT、MD。记住所选路径，重启后只读重新加载；简历分析只允许本地 Ollama。</p>
-        <button className="practice-secondary" disabled={!!busy || active} onClick={()=>void importResume()}><FileText size={16}/> {resume ? "重新选择简历" : "选择简历"}</button>
+        <button className="practice-secondary" disabled={updating || !!busy || active} onClick={()=>void importResume()}><FileText size={16}/> {resume ? "重新选择简历" : "选择简历"}</button>
         {resume && <p className="practice-file">{resume.name}{resume.truncated ? " · 仅使用前 1.2 万字" : ""}</p>}
         {resumePath && !resume && <p className="practice-warning">{resumeError || "正在重新读取已保存的简历…"}</p>}
-        {resumePath && <button className="practice-secondary" disabled={!!busy || active} onClick={onClearResume}>移除已保存简历</button>}
-        {resume && <button className="practice-secondary" disabled={!!busy || !local || active} onClick={()=>void analyzeResume()}>
+        {resumePath && <button className="practice-secondary" disabled={updating || !!busy || active} onClick={onClearResume}>移除已保存简历</button>}
+        {resume && <button className="practice-secondary" disabled={updating || !!busy || !local || active} onClick={()=>void analyzeResume()}>
           <Sparkles size={16}/> {busy === "analyze" ? "正在分析…" : "分析简历"}</button>}
         {resume && !local && <p className="practice-warning">分析简历需先用本地 Ollama；已有本地分析可继续用 API 练习项目题，每次发送摘录前单独确认。</p>}
         {!local && <p>技术题练习会把问题与回答发送给所选回答 API；简历内容不会发送。</p>}
@@ -315,7 +321,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     <section className="practice-dialogue">
       <div className="panel-header"><div><span className="panel-kicker">模拟现场</span><h2>模拟面试</h2></div><span className="panel-count"><Clock3 size={15}/> {minutesLabel(remaining)}</span></div>
       <div className="practice-controls">
-        {!active && <button className="start-btn" disabled={!!busy} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
+        {!active && <button className="start-btn" disabled={updating || !!busy} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
         {active && <button className="stop-btn" onClick={endSession}><Square size={14}/> 结束练习</button>}
         <span>{turns.length} 题已答 · 平均 {average}/5</span>
       </div>
@@ -358,7 +364,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           {reference.text && <p><MathText text={reference.text}/></p>}
           {reference.loading && <p role="status">{reference.text ? "正在继续生成…" : "回答模型正在生成参考内容…"}</p>}
           {reference.error && <p className="practice-reference-error" role="alert">{reference.error}</p>}
-          {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={!!busy}
+          {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={updating || !!busy}
             onClick={()=>{const turn=turnsRef.current.slice(-1)[0];if(question && turn)void generateReference(question,turn.id);}}>
             {reference.error ? "重新生成" : feedback.questionKind==="technical" ? "生成参考答案" : "生成参考思路"}</button>}
         </div>

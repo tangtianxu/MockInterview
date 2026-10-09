@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "MockInterview",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "identifier": "app.interviewcue.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -57,7 +57,7 @@
       "resources/sherpa-onnx/*.txt": "sherpa-onnx/",
       "resources/licenses/KaTeX-LICENSE.txt": "licenses/KaTeX-LICENSE.txt"
     },
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -71,6 +71,17 @@
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
         "installerHooks": "./nsis-hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBODU0QzlFMTdGRTgwRUQKUldUdGdQNFhua3lGMnRSWjVuenBXbmwwYUplc1lRSVJCWURHeEZsN3NacXB3cUlZSjRTU0FCbW8K",
+      "endpoints": [
+        "https://github.com/tangtianxu/MockInterview/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

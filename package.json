@@ -1,15 +1,15 @@
 {
   "name": "mock-interview",
   "private": true,
-  "version": "1.0.10",
+  "version": "1.0.11",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build --configLoader runner",
     "preview": "vite preview",
     "tauri": "tauri",
-    "release": "node scripts/release.js",
-    "release:dry-run": "node scripts/release.js --dry-run",
+    "release": "python scripts/publish-release.py",
+    "release:dry-run": "python scripts/publish-release.py --dry-run",
     "sync-version": "node scripts/sync-version.js"
   },
   "dependencies": {

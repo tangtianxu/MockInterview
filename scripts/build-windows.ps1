@@ -16,6 +16,14 @@ if (-not $env:LIBCLANG_PATH) {
 $cudaPath = if ($env:CUDA_PATH) { $env:CUDA_PATH } else { 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0' }
 $useCuda = -not $CpuStt -and (Test-Path (Join-Path $cudaPath 'bin\nvcc.exe'))
 Set-Location -LiteralPath $projectRoot
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    $releaseKey = Join-Path $env:LOCALAPPDATA 'MockInterviewRelease\signing.key'
+    if (-not (Test-Path -LiteralPath $releaseKey)) {
+        throw 'Release signing key required. Configure TAURI_SIGNING_PRIVATE_KEY before building.'
+    }
+    $env:TAURI_SIGNING_PRIVATE_KEY = $releaseKey
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+}
 if ($useCuda) {
     # Rust and the C++ parts of whisper.cpp use the static MSVC runtime.
     # CMake's CUDA default is /MD, which otherwise fails at link time (LNK2038).

@@ -244,3 +244,10 @@ html,body,#root{background:transparent!important}
 
 /* Ordinary content and controls keep an arrow; native resize corners retain direction cues. */
 .app-shell, .app-shell *:not(.resize-corner), .floating-shell, .floating-shell *:not(.resize-corner){cursor:default!important}
+
+/* Six settings categories fit two rows without shrinking their labels. */
+.settings-tabs{grid-template-columns:repeat(3,minmax(0,1fr))}
+.settings-fields{border:0;margin:0;padding:0;min-width:0}
+.update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.7;margin:12px 0;color:inherit}
+.update-progress{display:grid;gap:8px;font-size:13px;margin:15px 0}
+.update-progress progress{width:100%;height:9px;accent-color:#50cbb9}

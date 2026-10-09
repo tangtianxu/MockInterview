@@ -82,9 +82,23 @@ test('dual transcription supplies candidate context without triggering questions
  assert.equal(await page.evaluate(()=>window.calls.filter(x=>['mvp_decide','mvp_answer','mvp_explain'].includes(x.command)).some(x=>JSON.stringify(x.args).includes('INTRO_PRIVATE_'))),false);
  await page.getByRole('button',{name:'结束练习',exact:true}).click();
  // Settings save the prepared text in the existing profile file.
- await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'模型与服务'}).click();
+ await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'个人资料'}).click();
  await page.getByRole('textbox',{name:'自我介绍稿',exact:true}).fill('UPDATED_INTRO');
  await page.waitForFunction(()=>window.calls.some(x=>x.command==='save_interview_profile'&&JSON.stringify(x.args).includes('UPDATED_INTRO')));
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();
+ // The user's idle manual-test phrase must use the same saved-draft route.
+ const beforeManual=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length);
+ await page.getByRole('button',{name:'编辑问题',exact:true}).click();
+ await page.getByRole('textbox',{name:'修正模型理解的问题'}).fill('请你先做个简单的自我介绍');
+ await page.getByRole('textbox',{name:'修正模型理解的问题'}).press('Enter');
+ await page.locator('.answer-text').filter({hasText:'UPDATED_INTRO'}).waitFor();
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),beforeManual);
+ await page.getByRole('button',{name:'编辑问题',exact:true}).click();
+ await page.getByRole('textbox',{name:'修正模型理解的问题'}).fill('自我介绍里提到的 PPO 原理是什么');
+ await page.getByRole('textbox',{name:'修正模型理解的问题'}).press('Enter');
+ await page.locator('.answer-text').filter({hasText:'PPO 原理'}).waitFor();
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),beforeManual+1);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>['mvp_decide','mvp_answer','mvp_explain'].includes(x.command)).some(x=>JSON.stringify(x.args).includes('UPDATED_INTRO'))),false);
  for(const query of ['?disabled=1','?video=1','?api=1']){
   await load(query);const config=await page.evaluate(()=>JSON.parse(window.calls.find(x=>x.command==='start_capture_per_party').args.youConfig));
   assert.equal(config.stt_provider,query==='?api=1'?'groq_whisper':'web_speech');
