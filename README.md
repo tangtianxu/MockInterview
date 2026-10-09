@@ -1,8 +1,8 @@
 # 模拟面试练习 · MockInterview
 
-当前版本：1.0.6。
+当前版本：1.0.7。
 
-[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.6/MockInterview_1.0.6_x64-setup.exe) · [查看 1.0.6 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.6)
+[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.7/MockInterview_1.0.7_x64-setup.exe) · [查看 1.0.7 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.7)
 
 面向 Windows 11 的中文技术面试练习桌面应用。用户设置目标岗位、关注主题、练习范围、难度和时长后，模型逐题扮演面试官；用户可以输入回答，也可以用麦克风转写回答。每题提交后，应用显示参考评分、回答中的实际片段，以及值得进一步说明的方面。
 
@@ -148,6 +148,8 @@ API 密钥单独保存在 Windows 凭据管理器中，不写入可导出的配�
 流式生成中尚未闭合的公式暂时保留文本，完整后排版；格式错误或不支持的命令也保留原文。长公式可在公式区域横向滚动。排版不会验证数学推导是否正确，仍需核对模型提供的内容。
 
 ## 界面、数据保存与备份
+
+按住顶部标题栏的文字或空白区域可拖动窗口，按钮保持各自的点击功能；设置页和悬浮窗也可从标题栏拖动。内容区的滚动条采用透明轨道，避免覆盖标题栏与圆角。
 
 窗口支持缩放和调整大小；较窄时，题目与复盘内容排在设置区前面。顶部可控制练习设置区和回答复盘区的显示，窗口可设置置顶。设置中可选深色或浅色皮肤，并调整透明度。使用悬浮窗时，它显示当前练习问题和复盘摘要，适合在另一块屏幕或较小窗口中查看；完整操作仍在主窗口完成。
 

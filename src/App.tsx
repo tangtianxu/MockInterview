@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -183,6 +183,14 @@ function modelConnectionError(config: ModelConfig, cause: unknown, listing = fal
   return detail;
 }
 
+// Delegate from the whole title bar so nested text, badges and control gaps drag too.
+function dragWindow(event: MouseEvent<HTMLElement>) {
+  if(event.button!==0 || event.defaultPrevented || (event.target as Element).closest(
+    "button,[role=button],input,select,textarea,a,summary,[contenteditable],[data-no-window-drag]"))return;
+  event.preventDefault();
+  void getCurrentWebviewWindow().startDragging().catch(cause=>console.error("窗口拖动失败",cause));
+}
+
 function ResizeCorners() {
   const corners=(["NorthWest","NorthEast","SouthWest","SouthEast"] as const);
   return <>{corners.map(direction=><div key={direction} className={`resize-corner resize-${direction.toLowerCase()}`}
@@ -217,8 +225,8 @@ function Overlay() {
     return () => { active = false; unlisten?.();practiceStop?.();appearanceStop?.(); };
   }, []);
   return <div className={`floating-shell theme-${appearance.theme}`} style={{opacity:appearance.opacity/100}}>
-    <div className="floating-head" data-tauri-drag-region><div className="brand-mark small" data-tauri-drag-region><Sparkles size={18}/></div>
-      <span data-tauri-drag-region>模拟面试练习</span>{version && <span className="app-version" data-tauri-drag-region>v{version}</span>}<span className="floating-status" data-tauri-drag-region>{practice?"模拟练习":statusText[state.status]}</span>
+    <div className="floating-head" onMouseDown={dragWindow}><div className="brand-mark small"><Sparkles size={18}/></div>
+      <span>模拟面试练习</span>{version && <span className="app-version">v{version}</span>}<span className="floating-status">{practice?"模拟练习":statusText[state.status]}</span>
       <button className="icon-btn" aria-label="隐藏提示窗" onClick={() => void getCurrentWebviewWindow().hide()}><X size={16}/></button></div>
     <div className="floating-body">
       <div className="eyebrow">当前问题 {!practice && state.locked && <span className="lock-note"><LockKeyhole size={12}/> 正在说话，暂停更新</span>}</div>
@@ -485,7 +493,7 @@ function Main() {
   useEffect(() => {detailRef.current=detail;detailLoadingRef.current=detailLoading;}, [detail,detailLoading]);
   useEffect(() => {
     const container=transcriptScrollRef.current;
-    if (container && followTranscriptRef.current) container.scrollTop=container.scrollHeight;
+    if (container && followTranscriptRef.current) container.scrollTop=segments.length || partial ? container.scrollHeight : 0;
   }, [segments, partial, workspaceMode]);
   useEffect(() => {
     const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading};
@@ -1279,16 +1287,16 @@ function Main() {
 
   const visiblePanels=Number(!settings.compactView)+Number(settings.transcriptVisible)+Number(settings.answerVisible);
   return <div className={`app-shell theme-${settings.theme}${settings.compactView?" compact":""}${settings.transcriptVisible?"":" hide-transcript"}${settings.answerVisible?"":" hide-answer"}`} style={{opacity:settings.opacity/100}}>
-    <header className="app-header" data-tauri-drag-region>
-      <div className="brand" data-tauri-drag-region>
+    <header className="app-header" onMouseDown={dragWindow}>
+      <div className="brand">
         <div className="brand-mark" role="button" tabIndex={0} title="双击切换练习与实时提示页面"
           aria-label="双击切换练习与实时提示页面" onDoubleClick={()=>{
             if (running || practiceActive) {setSwitchNotice("请先结束当前练习");return;}
             setSwitchNotice("");setWorkspaceMode(value=>value==="practice"?"assist":"practice");
           }}
           onKeyDown={event=>{if(event.key==="Enter" && !running && !practiceActive)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
-        <div data-tauri-drag-region><strong data-tauri-drag-region>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
-          <span data-tauri-drag-region>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
+        <div><strong>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
+          <span>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
       <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : (settings.sharedModelConnection ? answerReady : decisionReady && answerReady) ? "本地模型已连接" : "本地模型未连接"}</span>
         {workspaceMode==="assist" && <>
         <button className="ghost-btn panel-toggle" onClick={()=>update({compactView:!settings.compactView})} aria-pressed={!settings.compactView}
@@ -1387,10 +1395,7 @@ function Main() {
       </section>
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
-      <div className="drawer-head" onMouseDown={event=>{
-        if (event.button === 0 && !(event.target as HTMLElement).closest("button"))
-          void getCurrentWebviewWindow().startDragging();
-      }}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",models:"模型与服务",diagnostics:"诊断日志"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
+      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",models:"模型与服务",diagnostics:"诊断日志"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
       <nav className="settings-tabs" role="tablist" aria-label="设置分类">
         {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["models","模型与服务",Sparkles], ["diagnostics","诊断日志",Activity] ] as const).map(([tab,label,Icon])=><button
           key={tab} role="tab" aria-selected={settingsTab===tab} className={settingsTab===tab?"settings-tab selected":"settings-tab"}
