@@ -1,0 +1,9 @@
+# 1.0.17 layout fix audit
+
+The introduction card in a narrow setup rail could be compressed by its column flex layout. Its text still needed the intrinsic content height, while overflow:hidden on the card clipped the description and guide button. The panel layout also allowed a setup rail as narrow as 120 CSS pixels.
+
+Rail children now retain their complete content height and scroll within the rail. Horizontal setup rails have a 220 CSS pixel minimum. A container query reduces card padding and heading size in narrow rails, preserving readable wrapping. The same rules apply to practice and assist setup rails; wide and stacked layouts retain their existing behaviour. Saved panel proportions, models, profile and history require no migration.
+
+The browser regression reproduces a 1040 x 480 viewport with the rail dragged to its minimum. It checks that the description and guide button remain inside the card, title/text wrap without horizontal overflow, and complete cards scroll in the rail. The pre-fix run failed; the corrected layout and onboarding tests both passed. Existing dark/light viewport matrices, panel visibility, title-bar dragging and divider pointer interaction remain included in these tests. A light-theme screenshot was visually inspected.
+
+The production frontend, signed Windows build and portable runtime verification passed (four Windows binaries, no CUDA DLL imports). Covered the installed 1.0.16 with 1.0.17; configuration files were byte-identical immediately after installation, installed binary matched the bundled build, and shortcuts were preserved. Installed startup passed with a Windows-only PATH, without CUDA environment variables, and with normal practice startup and privacy state. A stalled local HTTP answer was cancelled in 10 ms, and native close flushed the profile and exited normally. No generation, speech inference or structured-output logic changed in this patch.

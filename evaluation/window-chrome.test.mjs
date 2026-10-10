@@ -119,6 +119,23 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
       const other=main.locator('section').filter({has:page.locator('.panel-header')});
       assert.ok(await other.first().evaluate(el=>el.scrollWidth<=el.clientWidth+1));
     }
+    // A short viewport and a narrow dragged rail must scroll complete cards,
+    // rather than shrinking their backgrounds around overflowing text.
+    await page.setViewportSize({width:1040,height:480});
+    const setup=page.locator('.practice-setup');const divider=page.locator('.practice-workspace').getByRole('separator').first();
+    const handle=await divider.boundingBox();await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(12,handle.y+handle.height/2,{steps:8});await page.mouse.up();
+    await setup.evaluate(el=>el.scrollTop=0);
+    const rail=await setup.evaluate(el=>{
+      const hero=el.querySelector('.practice-hero'),card=hero.getBoundingClientRect();
+      const description=hero.querySelector('p').getBoundingClientRect(),button=hero.querySelector('button').getBoundingClientRect();
+      return {width:el.getBoundingClientRect().width,cardBottom:card.bottom,descriptionBottom:description.bottom,buttonBottom:button.bottom,
+        textFits:[...hero.querySelectorAll("h1,p,button")].every(child=>child.scrollWidth<=child.clientWidth+1),scrollHeight:el.scrollHeight,height:el.clientHeight};
+    });
+    assert.ok(rail.width>=220,'setup rail needs enough width for its controls');
+    assert.ok(rail.descriptionBottom<rail.cardBottom && rail.buttonBottom<rail.cardBottom,'hero text and guide button must fit inside its card: '+JSON.stringify(rail));
+    assert.ok(rail.textFits,'hero text must wrap without overflowing horizontally');
+    assert.ok(rail.scrollHeight>rail.height,'complete cards must scroll in a short rail');
+    await page.screenshot({path:'outputs/rail-card-narrow-light.png'});
     assert.equal(await page.locator('.resize-corner').count(),8);
     assert.equal(await page.locator('.resize-east').evaluate(el=>getComputedStyle(el).cursor),'ew-resize');
     assert.equal(await page.locator('.resize-north').evaluate(el=>getComputedStyle(el).cursor),'ns-resize');

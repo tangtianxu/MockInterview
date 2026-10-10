@@ -19,7 +19,7 @@ export function usePanelLayout(name:string,panels:string[],defaults:Record<strin
   const visible=vertical ? [...panels].sort((a,b)=>order.indexOf(a)-order.indexOf(b)) : panels;
   const values=visible.map(id=>Number.isFinite(weights[id])&&weights[id]>0?weights[id]:defaults[id]||1);
   const total=values.reduce((a,b)=>a+b,0)||1;
-  const minimums=visible.map(id=>vertical&&name==="practice"&&id==="dialogue"?340:120);
+  const minimums=visible.map(id=>!vertical&&id==="setup"?220:vertical&&name==="practice"&&id==="dialogue"?340:120);
   const minimumTotal=minimums.reduce((a,b)=>a+b,0);
   const available=Math.max(minimumTotal+40,(vertical?size.height:size.width)-Math.max(0,visible.length-1)*10);
   const pixels=values.map((value,index)=>minimums[index]+(available-minimumTotal)*value/total);

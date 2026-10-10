@@ -270,3 +270,11 @@ html,body,#root{background:transparent!important}
 .setup-guide.test-guide{margin-bottom:20px;padding:16px}
 .test-guide h3{font-size:18px}.test-guide p{font-size:12px}
 .test-progress{color:var(--accent,#50ddc3)}
+
+/* Rails scroll their complete cards; flex compression must not clip card contents. */
+.practice-setup,.left-rail{container-type:inline-size;container-name:setup-rail}
+.practice-setup>*,.left-rail>*{flex-shrink:0;min-width:0}
+@container setup-rail (max-width:260px){
+  .hero-card{padding:16px 14px}
+  .hero-card h1{font-size:20px;line-height:1.4}
+}
