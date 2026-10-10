@@ -9,9 +9,9 @@ test('dual and microphone-only transcription route questions and preserve contex
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  const params=new URLSearchParams(location.search);mockWindows('launcher');localStorage.clear();
- localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('offline')?'offline':params.get('video')?'video':'live',mic:params.get('namedMic')?'fixture-mic':'default',output:'fixture-speakers',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
+ localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('offline')?'offline':params.get('video')?'video':'live',mic:params.get('namedMic')?'fixture-mic':'default',output:'fixture-speakers',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,decisionIntervalSeconds:params.has('throttle')?undefined:2,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
  window.calls=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
- mockIPC(async(command,args)=>{window.calls.push({command,args});
+ mockIPC(async(command,args)=>{window.calls.push({command,args,at:performance.now()});
  if(command==='load_interview_profile')return null;
  if(command==='plugin:app|version')return 'test';
  if(command==='list_audio_devices')return JSON.stringify({inputs:[{id:'fixture-mic',name:'测试麦克风'}],outputs:[{id:'fixture-speakers',name:'测试扬声器'}]});
@@ -35,7 +35,7 @@ test('dual and microphone-only transcription route questions and preserve contex
  }
  return null;},{shouldMockEvents:true});createRoot(document.getElementById('root')).render(React.createElement(App));
  </script></body></html>`);
- const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','5197','--strictPort'],{windowsHide:true,stdio:'pipe'});
+ const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--configLoader','runner','--host','127.0.0.1','--port','5197','--strictPort'],{windowsHide:true,stdio:'pipe'});
  let output='';server.stdout.on('data',data=>output+=data);server.stderr.on('data',data=>output+=data);let browser;
  try{
  const url='http://127.0.0.1:5197/'+fixture;
@@ -43,6 +43,45 @@ test('dual and microphone-only transcription route questions and preserve contex
  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:1360,height:850}});page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  async function load(query=''){await page.goto(url+query);await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();await page.getByRole('button',{name:'开始聆听',exact:true}).click();await page.getByRole('button',{name:'结束练习',exact:true}).waitFor();}
  async function speech(speaker,id,text,time,final=true){await page.evaluate(({speaker,id,text,time,final})=>window.send(final?'transcript_final':'transcript_update',{segment:{id,text,speaker,timestamp_ms:time,is_final:final}}),{speaker,id,text,time,final});}
+ // Existing profiles without an interval get the new 5-second default.
+ await load('?throttle=1');
+ for(let i=0;i<25;i++)await speech('Them','burst','PPO 是什'+i,100,false);
+ await speech('Them','burst','PPO 是什么',100);await page.locator('.answer-text').filter({hasText:'PPO 是什么'}).waitFor();
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),1,'25 revisions produce one decision');
+ for(let i=0;i<5;i++)await speech('Them','burst','PPO 是什么',100);
+ await speech('Them','background','实际部署出现动作抖动',200);
+ await speech('Them','follow','怎么解决这个问题',300);
+ await page.waitForTimeout(800);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),1,'final fragments cannot bypass cooldown');
+ await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===2);
+ const batch=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide'));
+ assert.ok(batch[1].at-batch[0].at>=4990,'requests are separated by at least 5 seconds, allowing timer precision');
+ assert.equal(batch[1].args.input.currentText,'实际部署出现动作抖动\n怎么解决这个问题');
+ assert.match(batch[1].args.input.context,/PPO 是什么/);assert.doesNotMatch(batch[1].args.input.context,/实际部署/);
+ await page.waitForTimeout(500);assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),2);
+ await speech('Them','cancelled','结束后不应发出此请求',400);
+ await page.getByRole('button',{name:'结束练习',exact:true}).click();await page.waitForTimeout(5100);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),2,'stop cancels the pending batch');
+ await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'模型与服务'}).click();
+ const interval=page.getByRole('combobox',{name:'语义判别最小间隔'});assert.equal(await interval.inputValue(),'5');
+ await interval.selectOption('10');await page.waitForFunction(()=>window.calls.some(x=>x.command==='save_interview_profile'&&x.args.profile.settings.decisionIntervalSeconds===10));
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();
+ // Only the question channel controls pausing: online/video = system; offline = mic.
+ for(const query of ['', '?video=1', '?offline=1']){
+  const source=query.includes('offline')?'Mic':'System';const other=source==='Mic'?'System':'Mic';
+  await load(query);await page.evaluate(source=>window.send('audio_level',{source,level:1}),other);
+  await speech('Them','other-audio','PPO 的应用条件是什么',100,false);
+  await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===1);
+  await page.getByRole('button',{name:'结束练习',exact:true}).click();
+  await load(query);await speech('Them','active-audio','PPO 的应用条件是什么',100,false);
+  for(let i=0;i<7;i++){
+   await page.evaluate(source=>window.send('audio_level',{source,level:0.5}),source);await page.waitForTimeout(200);
+  }
+  assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),0,source+' speech must defer a provisional question');
+  await page.evaluate(source=>window.send('audio_level',{source,level:0}),source);
+  await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===1);
+  await page.getByRole('button',{name:'结束练习',exact:true}).click();
+ }
  await load();
  const capture=await page.evaluate(()=>window.calls.find(x=>x.command==='start_capture_per_party').args);
  assert.equal(JSON.parse(capture.youConfig).stt_provider,'whisper_cpp');assert.equal(JSON.parse(capture.youConfig).local_model_id,'small');

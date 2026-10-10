@@ -11,6 +11,7 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
   Maximize2, Mic2, Minus, MonitorPlay, Moon, PanelLeftClose, PanelLeftOpen, Pause, Pin, Play, Radio, RefreshCw, ScanText, Settings2, Sparkles, Sun,
   Square, Volume2, X } from "lucide-react";
 import { questionTransition } from "./decisionStability";
+import {DecisionScheduler,decisionIntervalSeconds} from "./decisionScheduler";
 import { dialogueContext } from "./dialogueContext";
 import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
@@ -46,7 +47,7 @@ type Settings = {
   theme: "dark" | "light"; opacity: number;
   targetRole: string; focusTopics: string; resumePath: string;
   micTranscription:boolean; selfIntroduction:string;
-  decisionFinalOnly:boolean;
+  decisionFinalOnly:boolean; decisionIntervalSeconds:number;
 };
 type SavedProfile = {settings:Settings;resumeAnalysis:{hash:string;analysis:Analysis}|null;
   practiceConfig?:PracticeConfig|null};
@@ -69,7 +70,7 @@ const defaults: Settings = {
   launcherOnTop: false, quitShortcut: "Control+Backquote",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
-  micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,
+  micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,decisionIntervalSeconds:5,
   decision: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answer: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answerInstructions: "",
@@ -102,6 +103,7 @@ function loadSettings(input?: unknown): Settings {
       mode:old.mode === "video" || old.mode === "offline" ? old.mode : "live",
       micTranscription:old.micTranscription!==false,
       decisionFinalOnly:old.decisionFinalOnly===true,
+      decisionIntervalSeconds:decisionIntervalSeconds(old.decisionIntervalSeconds),
       selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
       parallelAnswer:old.parallelAnswer===true,
       parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
@@ -401,12 +403,9 @@ function Main() {
   const micLastActiveRef = useRef(0);
   const captureStartingRef = useRef(false);
   const decisionBusyRef = useRef(false);
-  const decisionPendingRef = useRef<{text:string;sourceId:string;isFinal:boolean;version:number;receivedAt:number}|null>(null);
-  const decisionVersionRef = useRef(0);
+  const decisionSchedulerRef = useRef(new DecisionScheduler());
   const sessionEpochRef = useRef(0);
-  const lastDecisionTextRef = useRef("");
   const decisionTimerRef = useRef<ReturnType<typeof setTimeout>|null>(null);
-  const lastDecisionAtRef = useRef(0);
   const answerRequestRef = useRef("");
   const answerStartedRef = useRef(0);
   const answerRaceRef = useRef<AnswerRace|null>(null);
@@ -1103,17 +1102,23 @@ function Main() {
   }, []);
 
   const decideLatestRef = useRef<() => Promise<void>>(async () => {});
+  const scheduleDecision = useCallback(() => {
+    if(decisionTimerRef.current){clearTimeout(decisionTimerRef.current);decisionTimerRef.current=null;}
+    if(decisionBusyRef.current || !runningRef.current)return;
+    const config=settingsRef.current;
+    const delay=decisionSchedulerRef.current.nextDelay(performance.now(),config.decisionIntervalSeconds,config.decisionFinalOnly);
+    if(delay!==null)decisionTimerRef.current=setTimeout(()=>{decisionTimerRef.current=null;void decideLatestRef.current();},delay);
+  }, []);
   decideLatestRef.current = async () => {
     if (decisionBusyRef.current || !runningRef.current) return;
-    const pending = decisionPendingRef.current;
-    if (!pending) return;
-    if (manualOverrideSourceRef.current && pending.sourceId === manualOverrideSourceRef.current) {
-      decisionPendingRef.current=null;
-      return;
-    }
-    decisionPendingRef.current = null; decisionBusyRef.current = true;
+    const scheduler=decisionSchedulerRef.current;
+    if(manualOverrideSourceRef.current)scheduler.discard(manualOverrideSourceRef.current);
+    const config=settingsRef.current;
+    const pending=scheduler.take(performance.now(),config.decisionIntervalSeconds,config.decisionFinalOnly);
+    if(!pending){scheduleDecision();return;}
+    decisionBusyRef.current = true;
     const epoch = sessionEpochRef.current;
-    lastDecisionAtRef.current = Date.now(); setStatus(current => current === "generating" ? current : "deciding");
+    setStatus(current => current === "generating" ? current : "deciding");
     const started = performance.now();
     try {
       if(isSelfIntroductionRequest(pending.text)){
@@ -1124,7 +1129,7 @@ function Main() {
         return;
       }
       const recent=dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],
-        pending.sourceId,settingsRef.current.mode==="video");
+        pending.sourceIds,settingsRef.current.mode==="video");
       const decision = await invoke<Decision>("mvp_decide", {
         endpoint:liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别"),
         input:{ context:recent, currentText:pending.text, previousQuestion:questionRef.current,
@@ -1142,7 +1147,7 @@ function Main() {
         return;
       }
       setDecisionMs(elapsed);
-      logDiagnostic("语义判别",`${elapsed} ms · ${decision.action}/${decision.relation} · ${pending.isFinal?"稳定片段":"增量"}`);
+      logDiagnostic("语义判别",`${elapsed} ms · ${decision.action}/${decision.relation} · ${pending.isFinal?"稳定片段":"停顿增量"} · 合并 ${pending.sourceIds.length} 个片段`);
       setError("");
       // A newer ASR increment may already be queued. The decision for this
       // snapshot can still produce an early, revisable hint; the queued text
@@ -1168,30 +1173,19 @@ function Main() {
             decision.constraints || [],decision.uncertain_terms || [],transition,pending.receivedAt);
         } else if (!answerRequestRef.current) setStatus("listening");
       } else if (!answerRequestRef.current) setStatus("listening");
-    } catch (cause) {setStatus("error");setError(`语义判别失败：${String(cause)}`);logDiagnostic("语义判别失败");}
+    } catch (cause) {
+      if(runningRef.current && epoch===sessionEpochRef.current){setStatus("error");setError(`语义判别失败：${String(cause)}`);logDiagnostic("语义判别失败");}
+    }
     finally {
       decisionBusyRef.current = false;
-      if (decisionPendingRef.current && runningRef.current) {
-        const delay = Math.max(0,450-(Date.now()-lastDecisionAtRef.current));
-        decisionTimerRef.current = setTimeout(() => void decideLatestRef.current(),delay);
-      }
+      scheduleDecision();
     }
   };
 
   const queueDecision = useCallback((segment: Segment, isFinal: boolean) => {
     if(settingsRef.current.decisionFinalOnly && !isFinal)return;
-    const text = segment.text;
-    const normalized = text.trim();
-    const decisionKey = `${segment.id}:${isFinal ? "final" : "partial"}:${normalized}`;
-    if (!normalized || decisionKey === lastDecisionTextRef.current) return;
-    lastDecisionTextRef.current = decisionKey;
-    decisionPendingRef.current = {text:normalized,sourceId:segment.id,isFinal,
-      version:++decisionVersionRef.current,receivedAt:performance.now()};
-    if (decisionBusyRef.current) return;
-    if (decisionTimerRef.current) clearTimeout(decisionTimerRef.current);
-    const delay = Math.max(0,450-(Date.now()-lastDecisionAtRef.current));
-    decisionTimerRef.current = setTimeout(() => void decideLatestRef.current(),delay);
-  }, []);
+    if(decisionSchedulerRef.current.enqueue({text:segment.text,sourceId:segment.id,isFinal,receivedAt:performance.now()}))scheduleDecision();
+  }, [scheduleDecision]);
 
   useEffect(() => {
     let active = true; const stops: UnlistenFn[] = [];
@@ -1228,6 +1222,8 @@ function Main() {
       stops.push(await listen<{source:string;level:number}>("audio_level", event => {
         if (!active) return;
         const {source,level} = event.payload;
+        if(runningRef.current && source===(settingsRef.current.mode==="offline"?"Mic":"System"))
+          decisionSchedulerRef.current.audio(level,performance.now());
         if (source === "System") setSystemLevel(level);
         if (source === "Mic") {
           setMicLevel(level);
@@ -1373,7 +1369,8 @@ function Main() {
       setQuestion("");setEditingQuestion(false);setQuestionDraft("");
       setUncertainTerms([]);setKeyTerms([]);setDetail("");setDetailLoading(false);setShowDetail(false);
       setDecisionMs(null);setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
-      publishHint("");lastDecisionTextRef.current="";decisionVersionRef.current++;
+      publishHint("");decisionSchedulerRef.current.reset();
+      if(decisionTimerRef.current){clearTimeout(decisionTimerRef.current);decisionTimerRef.current=null;}
       liveHistory.begin("live",offline ? "线下面试 · 麦克风测试" : settings.mode==="video" ? "视频测试" : "实时问答");
       sessionEpochRef.current++;runningRef.current=true;setRunning(true);setStatus("listening");
       logDiagnostic("开始聆听",`${settings.mode} · ${settings.sttMode==="local" ? `${settings.sttEngine}/${settings.sttModel}` : `${settings.sttApiProvider}/${settings.sttApiModel}`} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
@@ -1383,9 +1380,9 @@ function Main() {
     }
   };
   const stop = async () => {
-    sessionEpochRef.current++;runningRef.current=false;setRunning(false);setStatus("idle");decisionVersionRef.current++;
-    decisionPendingRef.current=null;
-    if (decisionTimerRef.current) clearTimeout(decisionTimerRef.current);
+    sessionEpochRef.current++;runningRef.current=false;setRunning(false);setStatus("idle");
+    decisionSchedulerRef.current.reset();
+    if (decisionTimerRef.current){clearTimeout(decisionTimerRef.current);decisionTimerRef.current=null;}
     cancelAnswer();answerDisplayRef.current=null;pendingDisplayRef.current=null;
     partialRef.current=null;setPartial(null);micPartialRef.current=null;setMicPartial(null);
     lockedRef.current=false;setLocked(false);pendingHintRef.current="";
@@ -1827,8 +1824,12 @@ function Main() {
               onChange={e=>update({parallelLocal:{...settings.parallelLocal,baseUrl:e.target.value}})}/></label>
           </>}
         </div>
-        <div className="setting-group"><label className="check-row"><input type="checkbox" checked={settings.decisionFinalOnly} disabled={running || practiceWorking} onChange={e=>update({decisionFinalOnly:e.target.checked})}/>语义判别仅使用稳定转录片段（省 API 用量）</label>
-          <p className="setting-help">勾选后仍显示增量转录，但等片段稳定才调用判别模型；可减少重复请求，首条提示可能稍晚。默认保留增量判别。手动输入问题会跳过判别。</p></div>
+        <div className="setting-group"><label>语义判别最小间隔<select aria-label="语义判别最小间隔" value={settings.decisionIntervalSeconds} disabled={running || practiceWorking}
+          onChange={e=>update({decisionIntervalSeconds:Number(e.target.value)})}>
+          {[...new Set([2,3,5,8,10,15,30,settings.decisionIntervalSeconds])].sort((a,b)=>a-b).map(seconds=><option key={seconds} value={seconds}>{seconds} 秒{seconds===5?"（推荐）":""}</option>)}</select></label>
+          <p className="setting-help">默认两次判别至少间隔 5 秒。期间合并转录，优先等稳定片段；增量文字停更约 1.2 秒，并检测到提问音频停顿后再判别。没有音量数据时使用文字停更作为后备。没有新文本不调用，音量下降本身不触发请求。较长间隔更省用量，连续追问可能需等待剩余间隔；手动输入问题直接生成回答。</p>
+          <label className="check-row"><input type="checkbox" checked={settings.decisionFinalOnly} disabled={running || practiceWorking} onChange={e=>update({decisionFinalOnly:e.target.checked})}/>仅使用稳定转录片段（进一步省 API 用量）</label>
+          <p className="setting-help">勾选后不使用停顿增量，只等识别引擎给出稳定片段。仍显示实时转录，但提示可能稍晚。音量仅辅助判断停顿，任务内容仍由语义模型判别。</p></div>
         {(settings.decision.api === "ollama" || settings.answer.api === "ollama" || settings.parallelAnswer) && <div className="setting-group ollama-setup">
           <div className="setting-heading"><Sparkles size={18}/> 本地 Ollama
             <button className="text-link" onClick={()=>void refreshOllamaRuntime()} disabled={ollamaChecking}>{ollamaChecking?"检测中…":"重新检测"}</button></div>

@@ -2,6 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {dialogueContext} from '../src/dialogueContext.ts';
 const turn=(id,speaker,text,timestamp_ms)=>({id,speaker,text,timestamp_ms});
+test('batched latest speech is excluded from historical context while candidate replies remain',()=>{
+ const context=dialogueContext([turn('a','Them','PPO 是什么',1),turn('b','User','我使用 GAE',2),
+   turn('c','Them','工程背景',3),turn('d','Them','怎么解决',4)],[],['c','d'],false);
+ assert.equal(context,'面试官：PPO 是什么\n候选人：我使用 GAE');
+});
 test('dialogue retains both roles in time order and uses the newest partial revision',()=>{
  const context=dialogueContext([turn('a','Them','你采用什么方法？',1),turn('b','User','使用 GAE',2)],
  [turn('b','User','使用 GAE 估计优势',2),turn('c','Them','为什么选择它？',3)],'c',false);
