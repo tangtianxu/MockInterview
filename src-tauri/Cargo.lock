@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "interview-cue"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -9,7 +9,7 @@ test('dual transcription supplies candidate context without triggering questions
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  const params=new URLSearchParams(location.search);mockWindows('launcher');localStorage.clear();
- localStorage.setItem('interviewCue.settings',JSON.stringify({mode:params.get('video')?'video':'live',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
+ localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('video')?'video':'live',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
  window.calls=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='load_interview_profile')return null;

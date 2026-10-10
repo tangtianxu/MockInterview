@@ -175,6 +175,7 @@ impl OpusMtManager {
                         total_bytes: total_size,
                         percent,
                         status: status.to_string(),
+                        error: None,
                     },
                 );
             };
@@ -270,6 +271,7 @@ impl OpusMtManager {
                     total_bytes: total_size,
                     percent: 100.0,
                     status: "complete".to_string(),
+                    error: None,
                 },
             );
         });
@@ -366,6 +368,7 @@ fn emit_error(app_handle: &AppHandle, model_id: &str, msg: &str) {
             total_bytes: 0,
             percent: 0.0,
             status: "error".to_string(),
+            error: None,
         },
     );
 }

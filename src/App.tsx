@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
-import { open as choosePath, save as chooseBackupPath } from "@tauri-apps/plugin-dialog";
+import { open as choosePath, save as chooseBackupPath, ask } from "@tauri-apps/plugin-dialog";
 import { isRegistered, register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { exit } from "@tauri-apps/plugin-process";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -19,7 +19,7 @@ import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {useHistoryRecorder} from "./history";
 import {HistoryView} from "./HistoryView";
 import {connectModel,validateModelAddress} from "./modelConnection";
-import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
+import { connectionModel, modelServices, serviceId, serviceDefaults, providerDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
 
@@ -50,7 +50,7 @@ type SavedProfile = {settings:Settings;resumeAnalysis:{hash:string;analysis:Anal
   practiceConfig?:PracticeConfig|null};
 type PrivacyDisplayState = {launcher_capture_excluded:boolean;overlay_capture_excluded:boolean;taskbar_hidden:boolean;errors:string[]};
 type Device = { id: string; name: string; is_default: boolean };
-type ModelInfo = { id: string; name: string; is_downloaded: boolean; is_streaming: boolean; engine: string };
+type ModelInfo = { id: string; name: string; is_downloaded: boolean; is_streaming: boolean; engine: string; downloadUrl?:string; filename?:string };
 type EngineInfo = { engine: string; name: string; models: ModelInfo[] };
 type Segment = { id: string; text: string; speaker: string; timestamp_ms: number; is_final: boolean };
 type Decision = { intent: string; relation: string; action: "wait" | "show" | "revise" | "keep"; question: string;
@@ -62,14 +62,14 @@ type PracticePreview = {question:string;hint:string};
 const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在进行秋招技术面试。请把听到的技术问题转成便于口头回答的中文提示：首次出现英文术语时给中文释义，缩写能确认时先给英文全称和中文含义；然后简短说明定义与关键原理。每段一到两句话，避免空话。比较题说明选择依据和适用边界；不要编造我的项目经历。";
 
 const defaults: Settings = {
-  mode: "live", output: "default", mic: "default", sttMode: "local", sttEngine: "whisper_cpp", sttModel: "small",
+  mode: "live", output: "default", mic: "default", sttMode: "local", sttEngine: "sherpa_bilingual", sttModel: "paraformer-zh-en",
   sttApiProvider: "groq_whisper", sttApiModel: "whisper-large-v3-turbo", domain: "general",
   launcherOnTop: false, quitShortcut: "Control+Backquote",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
   micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,
-  decision: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
-  answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
+  decision: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
+  answer: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answerInstructions: "",
   sharedModelConnection: true,
   parallelAnswer: false, parallelLocal: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"manual"},
@@ -79,20 +79,21 @@ function loadSettings(input?: unknown): Settings {
   try {
     const old = (input ?? JSON.parse(localStorage.getItem("interviewCue.settings") || "{}")) as any;
     if (!old || typeof old !== "object" || Array.isArray(old)) return defaults;
-    const shared = {api:old.api || defaults.decision.api,baseUrl:old.baseUrl || defaults.decision.baseUrl};
-    const sttEngine = old.sttEngine === "sherpa_bilingual" ? "sherpa_bilingual" : "whisper_cpp";
+    const legacyDefaults=providerDefaults(old.api || defaults.decision.api);
+    const shared = {api:old.api || defaults.decision.api,baseUrl:old.baseUrl || legacyDefaults.baseUrl};
+    const sttEngine = !old.sttEngine ? (old.sttModel ? (["zipformer-zh-en","paraformer-zh-en"].includes(old.sttModel)?"sherpa_bilingual":"whisper_cpp") : defaults.sttEngine) : old.sttEngine === "sherpa_bilingual" ? "sherpa_bilingual" : "whisper_cpp";
     const sttModel = sttEngine === "sherpa_bilingual"
-      ? (["zipformer-zh-en","paraformer-zh-en"].includes(old.sttModel) ? old.sttModel : "zipformer-zh-en")
-      : (old.sttEngine && old.sttEngine !== "whisper_cpp" ? defaults.sttModel : old.sttModel || defaults.sttModel);
+      ? (["zipformer-zh-en","paraformer-zh-en"].includes(old.sttModel) ? old.sttModel : "paraformer-zh-en")
+      : (old.sttEngine && old.sttEngine !== "whisper_cpp" ? "small" : old.sttModel || "small");
     const normalize = (stage: ModelConfig): ModelConfig => {
       if (stage.api !== "openai" || !/^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(stage.baseUrl)) return stage;
       return {...stage,api:"deepseek",model:stage.model.startsWith("qwen3:") ? "deepseek-flash" : stage.model};
     };
     let previousPractice: {role?:string;topics?:string} = {};
     try {previousPractice=JSON.parse(localStorage.getItem("interviewCue.practiceConfig") || "{}");} catch { /* Older settings may be malformed. */ }
-    const decision=normalize({...defaults.decision,...shared,model:old.decisionModel || defaults.decision.model,...old.decision,
+    const decision=normalize({...defaults.decision,...shared,model:old.decisionModel || legacyDefaults.model,...old.decision,
       modelSelection:old.decision?.modelSelection || (old.decision || old.decisionModel || old.api ? "manual" : "auto")});
-    const answer=normalize({...defaults.answer,...shared,model:old.answerModel || defaults.answer.model,...old.answer,
+    const answer=normalize({...defaults.answer,...shared,model:old.answerModel || legacyDefaults.model,...old.answer,
       modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
     const sharedModelConnection=sharedConnectionDefault(old);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
@@ -345,6 +346,16 @@ function Main() {
   const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
   const [showDetail, setShowDetail] = useState(false);
   const [download, setDownload] = useState("");
+  const [downloadError,setDownloadError]=useState("");
+  const [downloadNotice,setDownloadNotice]=useState("");
+  const downloadTaskRef=useRef<{engine:string;model:string}|null>(null);
+  const [deletingModel,setDeletingModel]=useState(false);
+  const [managedOllamaModels,setManagedOllamaModels]=useState<string[]>([]);
+  const [managedOllamaSelection,setManagedOllamaSelection]=useState("");
+  const [managingOllama,setManagingOllama]=useState(false);
+  const [modelRemovalNotice,setModelRemovalNotice]=useState("");
+  const [modelRemovalError,setModelRemovalError]=useState("");
+  const modelRemovalRef=useRef(false);
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [decisionMs, setDecisionMs] = useState<number | null>(null);
   const [answerSource, setAnswerSource] = useState<DisplaySource|null>(null);
@@ -462,7 +473,7 @@ function Main() {
     return()=>{cancelled=true;stop?.();};
   },[]);
   const updateBlocked=running || practiceActive || practiceWorking || !profileReady ||
-    startingService || testingModel!==null || linkingModels || !!download || pulling ||
+    startingService || testingModel!==null || linkingModels || !!download || pulling || deletingModel || managingOllama ||
     status==="deciding" || status==="generating" || detailLoading;
   const updater=useSoftwareUpdate(updateBlocked,flushProfile);
   const softwareUpdatingRef=useRef(false);softwareUpdatingRef.current=updater.busy;
@@ -567,11 +578,11 @@ function Main() {
   const refreshEngines = useCallback(async () => {
     try {
       const raw = JSON.parse(await invoke<string>("list_local_stt_engines")) as Array<{
-        engine:string;name:string;models:Array<{definition:{model_id:string;display_name:string;is_streaming:boolean};is_downloaded:boolean}>}>;
-      setEngines(raw.map(item=>({engine:item.engine,name:item.name,models:item.models.map(model=>({
+        engine:string;name:string;models:Array<{definition:{model_id:string;display_name:string;is_streaming:boolean;download_url?:string;filename?:string};is_downloaded:boolean}>}>;
+      const items=raw.map(item=>({engine:item.engine,name:item.name,models:item.models.map(model=>({
         id:model.definition.model_id,name:model.definition.display_name,engine:item.engine,
-        is_streaming:model.definition.is_streaming,is_downloaded:model.is_downloaded,
-      }))})));
+        is_streaming:model.definition.is_streaming,is_downloaded:model.is_downloaded,downloadUrl:model.definition.download_url,filename:model.definition.filename,
+      }))}));setEngines(items);return items;
     }
     catch (cause) { setError(`读取语音模型失败：${String(cause)}`); }
   }, []);
@@ -727,6 +738,7 @@ function Main() {
       if(epoch!==connectionEpochRef.current)return;
       if(result.config.model!==config.model)commitModelConfig(stage,{model:result.config.model});
       setConnectedModels(current=>({...current,[stage]:result.config.model}));
+      if(stage==="answer")localStorage.setItem("mockInterview.guideConnection",JSON.stringify([result.config.api,result.config.baseUrl,result.config.model]));
       setModelErrors(current=>({...current,[stage]:result.listError ? modelConnectionError(config,result.listError,true) : ""}));
       setModelTests(current=>({...current,[stage]:`已连接 · ${result.config.model}。聊天请求已返回有效文字。`}));
       logDiagnostic("模型对话接口可用",`${stage} · ${config.api} · ${result.config.model}`);
@@ -972,7 +984,7 @@ function Main() {
 
   const startAnswer = useCallback(async (nextQuestion: string, focus: string[], keyTerms: string[],
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
-    if(softwareUpdatingRef.current)return;
+    if(softwareUpdatingRef.current || modelRemovalRef.current)return;
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
@@ -1242,11 +1254,22 @@ function Main() {
         finishAnswer(event.payload.requestId,event.payload.error);
       }));
       stops.push(await listen("mvp_detail_request", () => {void loadDetail();}));
-      stops.push(await listen<{engine:string;model_id:string;percent:number;status:string}>("model_download_progress", event => {
+      stops.push(await listen<{engine:string;model_id:string;percent:number;status:string;error?:string}>("model_download_progress", event => {
         const item = event.payload;
-        setDownload(item.status === "extracting" ? `${item.model_id} · 正在解压…` : `${item.model_id} · ${Math.round(item.percent)}%`);
-        if (item.status === "complete") {setDownload("");void refreshEngines();}
-        else if (item.status === "error") {setDownload("");setError(`下载或解压 ${item.model_id} 失败，请检查磁盘空间和网络后重试。`);}
+        const task=downloadTaskRef.current;
+        if(!task || task.engine!==item.engine || task.model!==item.model_id)return;
+        setDownload(item.status === "extracting" ? "正在解压模型…" : item.status==="verifying"?"正在校验模型…":item.status==="connecting_proxy"?"直连失败，正在尝试系统/环境代理…":`下载中 · ${Math.round(item.percent)}%`);
+        if (item.status === "complete") {
+          setDownload("正在检测模型文件…");void refreshEngines().then(items=>{
+            if(downloadTaskRef.current!==task)return;
+            const ready=items?.find(engine=>engine.engine===task.engine)?.models.find(model=>model.id===task.model)?.is_downloaded;
+            downloadTaskRef.current=null;setDownload("");
+            if(ready){setDownloadNotice("下载、校验与解压完成，语音模型已就绪。");setDownloadError("");}
+            else setDownloadError("下载已结束，但未检测到完整模型。请检查模型路径和磁盘空间，再重新检测或重试下载。");
+          });
+        }else if (item.status === "error" || item.status==="cancelled") {
+          downloadTaskRef.current=null;setDownload("");setDownloadError(item.status==="cancelled"?"下载已取消，可重新下载。":`语音模型下载失败：${item.error || "请检查网络、模型路径和磁盘空间后重试。"}`);
+        }
       }));
       stops.push(await listen("mvp_overlay_ready", () => {
         if(workspaceModeRef.current==="practice"){
@@ -1272,7 +1295,7 @@ function Main() {
   };
 
   const start = async () => {
-    if(updater.busy || practiceWorking || captureStartingRef.current || runningRef.current)return;
+    if(updater.busy || modelRemovalRef.current || practiceWorking || captureStartingRef.current || runningRef.current)return;
     captureStartingRef.current=true;setStartingService(true);
     try {await startCapture();}
     finally {captureStartingRef.current=false;setStartingService(false);}
@@ -1364,9 +1387,53 @@ function Main() {
     setOverlayVisible(!overlayVisible);
   };
   const downloadModel = async () => {
-    setError("");setDownload("准备下载…");
-    try {await invoke("download_local_stt_model",{engine:settings.sttEngine,modelId:settings.sttModel});}
-    catch (cause) {setDownload("");setError(`模型下载失败：${String(cause)}`);}
+    if(downloadTaskRef.current || modelRemovalRef.current)return;
+    const task={engine:settings.sttEngine,model:settings.sttModel};downloadTaskRef.current=task;
+    setDownloadError("");setDownloadNotice("");setDownload("下载中 · 正在连接下载服务器…");
+    try {await invoke("download_local_stt_model",{engine:task.engine,modelId:task.model});}
+    catch (cause) {if(downloadTaskRef.current===task){downloadTaskRef.current=null;setDownload("");setDownloadError(`语音模型下载失败：${String(cause)}`);}}
+  };
+
+  const modelRemovalBlocked=updateBlocked || updater.busy || managingOllama;
+  const managedOllamaConfig=settings.answer.api==="ollama"?settings.answer:
+    settings.decision.api==="ollama"?settings.decision:settings.parallelLocal;
+  useEffect(()=>{setManagedOllamaModels([]);setManagedOllamaSelection("");},[managedOllamaConfig.baseUrl]);
+  const refreshManagedOllama=async()=>{
+    if(modelRemovalBlocked || modelRemovalRef.current)return;
+    setManagingOllama(true);setModelRemovalError("");setModelRemovalNotice("");
+    try {
+      const names=await invoke<string[]>("mvp_list_models",{endpoint:endpoint({...managedOllamaConfig,api:"ollama"},"answer")});
+      setManagedOllamaModels(names);setManagedOllamaSelection(current=>names.includes(current)?current:names[0] || "");
+      if(!names.length)setModelRemovalNotice("该 Ollama 服务没有已下载模型。");
+    }catch(cause){setModelRemovalError(`检测 Ollama 模型失败：${String(cause)}`);setManagedOllamaModels([]);setManagedOllamaSelection("");}
+    finally{setManagingOllama(false);}
+  };
+  const removeDownloadedModel=async(kind:"speech"|"ollama")=>{
+    if(modelRemovalBlocked || modelRemovalRef.current)return;
+    const speech=chosenModel;
+    const model=kind==="speech"?speech?.id:managedOllamaSelection;
+    if(!model || (kind==="speech"?!speech?.is_downloaded:!managedOllamaModels.includes(model)))return;
+    const address=kind==="speech"?`${sttModelsDirectory}\\${settings.sttEngine}\\${speech?.filename || model}`:managedOllamaConfig.baseUrl;
+    modelRemovalRef.current=true;setDeletingModel(true);setModelRemovalError("");setModelRemovalNotice("");
+    try {
+      const approved=await ask(`删除 ${kind==="speech"?"语音":"Ollama"}模型：${kind==="speech"?speech?.name:model}\n位置 / 服务：${address}\n\n${kind==="speech"?"将删除所选模型文件。":"通过本机 Ollama 删除该模型，其他使用它的软件也会受影响。"}需要再次使用时须重新下载。是否继续？`,{title:"删除本地模型",kind:"warning",okLabel:"删除模型",cancelLabel:"取消"});
+      if(!approved)return;
+      if(kind==="speech") {
+        await invoke("delete_local_stt_model",{engine:settings.sttEngine,modelId:model});
+        await refreshEngines();setDownloadNotice("");setDownloadError("");
+      }else {
+        await invoke("delete_ollama_model",{baseUrl:managedOllamaConfig.baseUrl,model});
+        const names=await invoke<string[]>("mvp_list_models",{endpoint:endpoint({...managedOllamaConfig,api:"ollama"},"answer")});
+        setManagedOllamaModels(names);setManagedOllamaSelection(names[0] || "");
+        setConnectedModels(current=>({decision:settings.decision.api==="ollama"&&settings.decision.model===model?"":current.decision,
+          answer:settings.answer.api==="ollama"&&settings.answer.model===model?"":current.answer}));
+        if(settings.answer.api==="ollama")await refreshModels("answer");
+        if(!settings.sharedModelConnection && settings.decision.api==="ollama")await refreshModels("decision");
+        setParallelModels(current=>current.filter(name=>name!==model));
+      }
+      setModelRemovalNotice(`已删除模型 ${model}；重新使用前请下载并检测。`);
+    }catch(cause){setModelRemovalError(`模型删除失败：${String(cause)}`);}
+    finally{modelRemovalRef.current=false;setDeletingModel(false);}
   };
 
   const exportProfile = async () => {
@@ -1485,7 +1552,7 @@ function Main() {
           <Pin size={16}/> {settings.launcherOnTop ? "取消置顶" : "窗口置顶"}</button>
         <button className="ghost-btn" onClick={() => void toggleOverlay()}><MonitorPlay size={17}/> {overlayVisible?"隐藏悬浮窗":"显示悬浮窗"}</button>
         {workspaceMode==="assist" && <>
-        <button className={running?"stop-btn":"start-btn"} onClick={() => void (running?stop():start())} disabled={startingService || updater.busy}>
+        <button className={running?"stop-btn":"start-btn"} onClick={() => void (running?stop():start())} disabled={startingService || updater.busy || deletingModel || managingOllama}>
           {running?<><Square size={14} fill="currentColor"/> 结束练习</>:startingService?"连接本地模型…":<><Play size={15} fill="currentColor"/> 开始聆听</>}
         </button>
         </>}
@@ -1497,11 +1564,23 @@ function Main() {
         </div>
     </header>
     {(historyError || practiceHistoryError || historyNativeError) && <p className="error-box history-save-error" role="alert">{historyError || practiceHistoryError || historyNativeError}</p>}
+    {error&&<p className="error-box history-save-error" role="alert">{error}</p>}
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
-      onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy}
+      onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy || deletingModel || managingOllama}
       onPreviewChange={setPracticePreview} history={practiceHistoryRecorder}
       onModelSettings={()=>{setSettingsTab("models");setShowSettings(true);}}
+      guideSetup={{local:settings.answer.api==="ollama",blocked:running || practiceWorking || updater.busy || startingService || pulling || testingModel!==null || linkingModels || deletingModel || managingOllama,
+        modelConnected:connectedModels.answer===settings.answer.model || localStorage.getItem("mockInterview.guideConnection")===JSON.stringify([settings.answer.api,settings.answer.baseUrl,settings.answer.model]),
+        modelControls:showSettings?null:stageEditor("answer","生成模型连接",answerModels,answerReady),
+        onBranch:local=>{if((settings.answer.api==="ollama")!==local)configureStage("answer",local?"ollama":"deepseek");if(!settings.sharedModelConnection)void toggleSharedModels(true);},
+        ollamaFound:!!ollamaRuntime?.executable,ollamaConnected:!!ollamaRuntime?.connected,ollamaChecking,ollamaStarting:startingService,ollamaError:ollamaCheckError,
+        onDetectOllama:()=>void refreshOllamaRuntime(),onStartOllama:()=>void startService(),onOllamaPaths:()=>{setSettingsTab("models");setShowSettings(true);},
+        pullModel:pullModelId,onPullModelChange:setPullModelId,pulling,pullProgress,onPull:()=>void pullOllamaModel(),
+        speechModel:settings.sttModel,speechReady:!!chosenModel?.is_downloaded,speechDirectory:sttModelsDirectory,speechDownload:download,speechError:downloadError,speechNotice:downloadNotice,speechUrl:chosenModel?.downloadUrl || "",speechFilename:chosenModel?.filename || "",speechEngine:settings.sttEngine,
+        onSpeechModel:value=>{update({sttMode:"local",sttEngine:"sherpa_bilingual",sttModel:value});setDownloadError("");setDownloadNotice("");},
+        onSpeechDownload:()=>void downloadModel(),onSpeechPath:()=>void chooseSttModelsDirectory(),onSpeechDetect:()=>void refreshEngines(),
+        onProfile:()=>{setSettingsTab("profile");setShowSettings(true);},onAudio:()=>{setSettingsTab("audio");setShowSettings(true);}}}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
       onResumeImported={importResume} onAnalysis={storeResumeAnalysis} onClearResume={clearResume}
@@ -1558,7 +1637,7 @@ function Main() {
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
           {showDetail && hint && answerSource!=="saved" && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
-          {error && <div className="error-box">{error}</div>}</div>
+          </div>
         <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? "已保存的自我介绍" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
       </section>
     </main>}
@@ -1663,17 +1742,22 @@ function Main() {
           {settings.sttMode === "local" ? <>
             <p className="setting-help">当前已适配：Whisper.cpp 的下列 GGML 模型，以及官方 Sherpa-ONNX 的 Zipformer 中英双语版和 Paraformer 中英双语版。两款双语模型是真流式识别，可持续输出增量文字；Whisper 按音频块推理。其他 ONNX 或同名模型不能仅靠选择文件夹直接使用。</p>
             <label>识别引擎<select value={settings.sttEngine} onChange={e=>update({sttEngine:e.target.value,
-              sttModel:e.target.value === "sherpa_bilingual" ? "zipformer-zh-en" : "small"})} disabled={running || !!download}>
+              sttModel:e.target.value === "sherpa_bilingual" ? "zipformer-zh-en" : "small"})} disabled={running || !!download || deletingModel}>
               <option value="whisper_cpp">Whisper.cpp · 分块识别</option>
               <option value="sherpa_bilingual">Sherpa-ONNX · 中英双语流式</option>
             </select></label>
-            <label>识别模型<select value={settings.sttModel} onChange={e=>update({sttModel:e.target.value})} disabled={running}>{chosenEngine?.models.map(item=><option key={item.id} value={item.id}>{item.name} {item.is_downloaded?"✓":"· 未下载"}</option>)}</select></label>
+            <label>识别模型<select value={settings.sttModel} onChange={e=>update({sttModel:e.target.value})} disabled={running || !!download || deletingModel}>{chosenEngine?.models.map(item=><option key={item.id} value={item.id}>{item.name} {item.is_downloaded?"✓":"· 未下载"}</option>)}</select></label>
             {settings.sttEngine === "sherpa_bilingual" && <p className="setting-help">这两款使用已打包的 sherpa-onnx CPU 运行库。首次点击下载会从魔搭镜像取得已核对的模型包，经 SHA-256 校验后解压；Zipformer 约 511 MB，Paraformer 约 226 MB，请预留解压空间。双语支持不等于术语识别已验证，具体效果以试听为准。</p>}
             <p className="setting-help">当前语音模型目录：{sttModelsDirectory || "正在读取…"}</p>
-            <div className="key-actions"><button onClick={()=>void chooseSttModelsDirectory()} disabled={running || !!download}>选择已有模型文件夹</button>
-              <button onClick={()=>void refreshEngines()} disabled={running}>重新检测</button></div>
+            <div className="key-actions"><button onClick={()=>void chooseSttModelsDirectory()} disabled={running || !!download || deletingModel}>选择已有模型文件夹</button>
+              <button onClick={()=>void refreshEngines()} disabled={running || deletingModel}>重新检测</button></div>
             <p className="setting-help">选择模型总目录；其中 Whisper 放在 whisper_cpp，双语模型放在 sherpa_bilingual 子文件夹。已有模型不会被移动或重新下载。</p>
-            {!chosenModel?.is_downloaded && <button className="download-btn" onClick={()=>void downloadModel()} disabled={!!download}>{download||"下载所选模型"}</button>}
+            {!chosenModel?.is_downloaded && <button className="download-btn" onClick={()=>void downloadModel()} disabled={!!download || deletingModel}>{download||"下载所选模型"}</button>}
+            {chosenModel?.is_downloaded&&<button className="download-btn" disabled={modelRemovalBlocked} onClick={()=>void removeDownloadedModel("speech")}>{deletingModel?"正在删除模型…":"删除所选语音模型"}</button>}
+            <p className="setting-help">{settings.sttEngine==="sherpa_bilingual"?"下载源：ModelScope 国内镜像，通常无需 VPN；优先直连，连接失败再尝试系统/环境代理。":"下载源：Hugging Face 境外站点，部分网络需 VPN/代理；当前未配置国内镜像。"} 下载和识别不依赖 Ollama。</p>
+            {chosenModel?.downloadUrl&&<button className="download-btn" onClick={()=>void openExternal(chosenModel.downloadUrl!).catch(cause=>setDownloadError(`无法打开下载链接：${String(cause)}`))}>浏览器下载所选模型</button>}
+            <p className="setting-help">应用内下载失败可用浏览器下载。流式模型包解压后，把完整的模型文件夹放入模型总目录的 sherpa_bilingual 下；Whisper 文件放入 whisper_cpp 下，再重新检测。请使用上方链接对应的模型，勿改文件夹名称。</p>
+            {downloadError&&<p className="error-box" role="alert">{downloadError}</p>}{downloadNotice&&<p className="setting-help" role="status">{downloadNotice}</p>}
           </> : <>
             <p className="setting-help">语音 API 目前分别适配 Groq Whisper 的分段上传接口与 Deepgram Nova 的实时流式接口。模型 ID 必须由所选服务提供；其他语音服务即使也叫“Whisper”或提供 API，仍需对应的接入适配。</p>
             <label>服务<select value={settings.sttApiProvider} onChange={e=>update({sttApiProvider:e.target.value as SttApiProvider,
@@ -1739,6 +1823,14 @@ function Main() {
           {pullProgress && <p className="setting-help" role="status">{pullProgress}</p>}
           <p className="setting-help">下载完成后，在下方判别和回答设置中选择该模型。模型文件可能占用数 GB；API 模式无需安装 Ollama。</p>
         </div>}
+        <div className="setting-group"><details><summary>管理已下载的本地生成模型（Ollama）</summary>
+          <p className="setting-help">Ollama 服务：{managedOllamaConfig.baseUrl}。删除会影响其他使用该模型的软件；通过 Ollama 管理共享权重，不直接删除整个模型目录。仅支持本机服务，API 模型由服务商托管。</p>
+          <button className="download-btn" disabled={modelRemovalBlocked} onClick={()=>void refreshManagedOllama()}>{managingOllama?"正在检测模型…":"检测已下载的 Ollama 模型"}</button>
+          <label>已下载的 Ollama 模型<select value={managedOllamaSelection} disabled={modelRemovalBlocked || !managedOllamaModels.length} onChange={event=>setManagedOllamaSelection(event.target.value)}>
+            {!managedOllamaModels.length&&<option value="">请先检测本机模型</option>}{managedOllamaModels.map(name=><option key={name} value={name}>{name}</option>)}</select></label>
+          <button className="download-btn" disabled={modelRemovalBlocked || !managedOllamaSelection} onClick={()=>void removeDownloadedModel("ollama")}>{deletingModel?"正在删除模型…":"删除所选 Ollama 模型"}</button>
+        </details></div>
+        {(modelRemovalNotice || modelRemovalError)&&<p className={modelRemovalError?"error-box":"setting-help"} role={modelRemovalError?"alert":"status"}>{modelRemovalError || modelRemovalNotice}</p>}
         </>}
         {settingsTab === "display" &&
         <div className="setting-group"><div className="setting-heading"><Pin size={18}/> 窗口与快捷键</div>

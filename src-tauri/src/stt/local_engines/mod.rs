@@ -4,7 +4,7 @@ pub mod model_registry;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -18,8 +18,11 @@ use model_registry::{get_engines, get_model, get_models_for_engine, ModelDefinit
 /// For archive models, `filename` is a directory after extraction.
 pub struct ModelManager {
     models_dir: PathBuf,
-    active_downloads: HashMap<String, Arc<AtomicBool>>,
+    active_downloads: HashMap<String, DownloadJob>,
 }
+struct DownloadJob {cancel:Arc<AtomicBool>,finished:Arc<AtomicBool>}
+struct FinishDownload(Arc<AtomicBool>);
+impl Drop for FinishDownload {fn drop(&mut self){self.0.store(true,Ordering::SeqCst);}}
 
 impl ModelManager {
     pub fn new(models_dir: PathBuf) -> Self {
@@ -101,27 +104,13 @@ impl ModelManager {
         // Ensure engine subdirectory exists
         let engine_dir = self.models_dir.join(engine);
         std::fs::create_dir_all(&engine_dir)
-            .map_err(|e| format!("Failed to create engine directory: {}", e))?;
+            .map_err(|e| format!("无法创建模型目录：{}（{e}）。请选择当前用户可写的目录", engine_dir.display()))?;
 
         let download_key = format!("{}:{}", engine, model_id);
-        if self.active_downloads.contains_key(&download_key) {
-            // Check if the download or extraction is actually still running
-            let check_path = if def.is_archive {
-                engine_dir.join(format!("{}.tar.bz2", def.filename))
-            } else {
-                self.model_file_path(engine, def.filename)
-            };
-            let tmp_path = check_path.with_extension("download");
-            // Still downloading (temp file exists) or still extracting (archive exists)
-            if tmp_path.exists() {
-                return Err("Download already in progress".to_string());
-            }
-            if def.is_archive && check_path.exists() {
-                return Err("Extraction in progress".to_string());
-            }
-            // Stale entry — previous download finished, clean up
-            self.active_downloads.remove(&download_key);
+        if self.active_downloads.get(&download_key).is_some_and(|job|!job.finished.load(Ordering::SeqCst)) {
+            return Err("该模型正在下载或解压，请等待当前任务结束".into());
         }
+        self.active_downloads.remove(&download_key);
 
         let is_archive = def.is_archive;
         let dest_path = if is_archive {
@@ -132,8 +121,9 @@ impl ModelManager {
         };
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let finished=Arc::new(AtomicBool::new(false));
         self.active_downloads
-            .insert(download_key, Arc::clone(&cancel_flag));
+            .insert(download_key,DownloadJob{cancel:Arc::clone(&cancel_flag),finished:finished.clone()});
 
         let url = def.download_url.to_string();
         let sha256 = def.sha256.to_string();
@@ -145,6 +135,7 @@ impl ModelManager {
         let model_dir_path = engine_dir.join(def.filename);
 
         tokio::spawn(async move {
+            let _finish=FinishDownload(finished);
             let result = downloader::download_file(
                 &url,
                 &dest_path,
@@ -171,7 +162,8 @@ impl ModelManager {
                         downloaded_bytes: 0,
                         total_bytes: 0,
                         percent: 0.0,
-                        status: "error".to_string(),
+                        status: if e == "下载已取消" { "cancelled" } else { "error" }.to_string(),
+                        error: Some(e),
                     },
                 );
                 return;
@@ -188,6 +180,7 @@ impl ModelManager {
                     let _ = app_handle.emit("model_download_progress", &downloader::DownloadProgress {
                         engine:engine_str, model_id:model_id_str, downloaded_bytes:actual,
                         total_bytes:expected_bytes, percent:0.0, status:"error".into(),
+                        error:Some(format!("模型包大小不符：预期 {expected_bytes} 字节，收到 {actual} 字节，请重试下载")),
                     });
                     return;
                 }
@@ -205,24 +198,21 @@ impl ModelManager {
                         total_bytes: 0,
                         percent: 100.0,
                         status: "extracting".to_string(),
+                        error: None,
                     },
                 );
 
-                // Remove any old raw file at the model directory path
-                // (leftover from previous buggy downloads that saved the archive as a file)
-                if model_dir_path.is_file() {
-                    log::info!(
-                        "Removing stale raw archive file at: {}",
-                        model_dir_path.display()
-                    );
-                    let _ = tokio::fs::remove_file(&model_dir_path).await;
-                }
-
                 let archive_for_extract = dest_path.clone();
                 let extract_dest = engine_dir;
+                let filename = def.filename.to_owned();
+                let validate_engine = engine_str.clone();
+                let validate_model = model_id_str.clone();
 
                 let extract_result = tokio::task::spawn_blocking(move || {
-                    downloader::extract_tar_bz2(&archive_for_extract, &extract_dest)
+                    downloader::install_archive(&archive_for_extract, &extract_dest, &filename, |path| {
+                        validate_engine != "sherpa_bilingual" ||
+                            crate::stt::sherpa_bilingual::model_files_available(path, &validate_model)
+                    })
                 })
                 .await;
 
@@ -234,6 +224,7 @@ impl ModelManager {
                             let _ = app_handle.emit("model_download_progress", &downloader::DownloadProgress {
                                 engine:engine_str, model_id:model_id_str, downloaded_bytes:0,
                                 total_bytes:0, percent:0.0, status:"error".into(),
+                                error:Some("模型解压后缺少所需文件，请检查磁盘空间并重试下载".into()),
                             });
                             return;
                         }
@@ -249,6 +240,7 @@ impl ModelManager {
                                 total_bytes: 0,
                                 percent: 100.0,
                                 status: "complete".to_string(),
+                                error: None,
                             },
                         );
                     }
@@ -268,6 +260,7 @@ impl ModelManager {
                                 total_bytes: 0,
                                 percent: 0.0,
                                 status: "error".to_string(),
+                                error: Some(e),
                             },
                         );
                     }
@@ -287,6 +280,7 @@ impl ModelManager {
                                 total_bytes: 0,
                                 percent: 0.0,
                                 status: "error".to_string(),
+                                error: Some(e.to_string()),
                             },
                         );
                     }
@@ -302,6 +296,7 @@ impl ModelManager {
                         total_bytes: 0,
                         percent: 100.0,
                         status: "complete".to_string(),
+                        error: None,
                     },
                 );
             }
@@ -313,14 +308,18 @@ impl ModelManager {
     /// Cancel an active download.
     pub fn cancel_download(&mut self, engine: &str, model_id: &str) {
         let key = format!("{}:{}", engine, model_id);
-        if let Some(flag) = self.active_downloads.remove(&key) {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(job) = self.active_downloads.get(&key) {
+            job.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             log::info!("Cancelled download for {}:{}", engine, model_id);
         }
     }
 
     /// Delete a downloaded model from disk (handles both files and directories).
     pub fn delete_model(&mut self, engine: &str, model_id: &str) -> Result<(), String> {
+        let key = format!("{engine}:{model_id}");
+        if self.active_downloads.get(&key).is_some_and(|job|!job.finished.load(Ordering::SeqCst)) {
+            return Err("模型正在下载或解压，请等待任务结束再删除".into());
+        }
         let def = get_model(engine, model_id)
             .ok_or_else(|| format!("Unknown model: {}:{}", engine, model_id))?;
 
@@ -331,6 +330,13 @@ impl ModelManager {
         } else if path.is_file() {
             std::fs::remove_file(&path)
                 .map_err(|e| format!("Failed to delete model file: {}", e))?;
+        }
+        if def.is_archive {
+            let archive = path.with_file_name(format!("{}.tar.bz2", def.filename));
+            for leftover in [archive.with_extension("download"), archive] {
+                if leftover.is_file() { std::fs::remove_file(&leftover)
+                    .map_err(|e| format!("模型已删除，但无法清理下载文件：{e}"))?; }
+            }
         }
         log::info!(
             "Deleted model: {}:{} from {}",
@@ -376,4 +382,24 @@ pub struct EngineWithStatus {
     pub name: String,
     pub description: String,
     pub models: Vec<ModelWithStatus>,
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    #[test]
+    fn removal_is_scoped_to_selected_model_and_rejects_an_active_job() {
+        let root=tempfile::tempdir().unwrap();
+        let mut manager=ModelManager::new(root.path().to_owned());
+        let dir=root.path().join("whisper_cpp"); std::fs::create_dir(&dir).unwrap();
+        let selected=dir.join("ggml-tiny.bin"); let other=dir.join("ggml-base.bin");
+        std::fs::write(&selected,b"selected").unwrap(); std::fs::write(&other,b"keep").unwrap();
+        let finished=Arc::new(AtomicBool::new(false));
+        manager.active_downloads.insert("whisper_cpp:tiny".into(),DownloadJob{cancel:Arc::new(AtomicBool::new(false)),finished:finished.clone()});
+        assert!(manager.delete_model("whisper_cpp","tiny").is_err()); assert!(selected.exists());
+        finished.store(true,Ordering::SeqCst);
+        manager.delete_model("whisper_cpp","tiny").unwrap(); assert!(!selected.exists());
+        assert_eq!(std::fs::read(other).unwrap(),b"keep");
+        assert!(manager.delete_model("../","base").is_err());
+    }
 }

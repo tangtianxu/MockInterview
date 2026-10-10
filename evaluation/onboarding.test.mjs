@@ -1,0 +1,83 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {spawn} from 'node:child_process';import {mkdir,writeFile,unlink} from 'node:fs/promises';import {chromium} from 'playwright-core';
+test('API onboarding needs no Ollama; downloads report every phase and resume upload requires fresh consent',{timeout:60000},async()=>{
+ const fixture='outputs/onboarding-fixture.html';await mkdir('outputs',{recursive:true});
+ await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
+ import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
+ mockWindows('launcher');window.calls=[];window.downloaded=false;window.allowSending=false;window.connected=false;window.progress=payload=>emit('model_download_progress',payload);
+ mockIPC(async(command,args)=>{window.calls.push({command,args});
+ if(command==='load_interview_profile')return {settings:new URLSearchParams(location.search).has('legacy')?{api:'ollama',sttModel:'small'}:{},resumeAnalysis:null};if(command==='plugin:app|version')return '1.0.15';
+ if(command==='list_audio_devices')return JSON.stringify({inputs:[],outputs:[]});
+ if(command==='list_local_stt_engines')return JSON.stringify([{engine:'sherpa_bilingual',name:'Sherpa',models:['paraformer-zh-en','zipformer-zh-en'].map(model_id=>({definition:{model_id,display_name:model_id,is_streaming:true,download_url:'https://modelscope.cn/models/fixture/resolve/master/model.tar.bz2',filename:'fixture-model'},is_downloaded:model_id==='paraformer-zh-en'&&window.downloaded}))}]);
+ if(command==='local_stt_model_directory')return 'C:/models';
+ if(command==='ollama_runtime_status')return {executable:window.connected?'C:/fixture/ollama.exe':null,connected:window.connected,configFile:'fixture'};
+ if(command==='start_local_service'){window.connected=true;return;}
+ if(command==='mvp_list_models')return args.endpoint.api==='ollama'?(window.ollamaDeleted?[]:['qwen3:4b-instruct']):['deepseek-flash'];
+ if(command==='delete_local_stt_model'){window.downloaded=false;return;}
+ if(command==='delete_ollama_model'){window.ollamaDeleted=true;return;}
+ if(command==='has_api_key')return true;if(command.includes('is_registered'))return false;
+ if(command==='get_privacy_display_state'||command==='set_taskbar_hidden')return {errors:[],launcher_capture_excluded:true,overlay_capture_excluded:true,taskbar_hidden:true};
+ if(command==='plugin:dialog|open')return args.options.directory?'C:/models':'C:/fixture/resume.txt';if(command==='plugin:dialog|ask')return window.allowSending;
+ if(command==='practice_read_resume')return {name:'fixture.txt',text:'SYNTHETIC_RESUME_ONLY',hash:'fixture-hash',truncated:false};
+ if(command==='practice_model')return {summary:'SYNTHETIC_ANALYSIS',skills:[],projects:[],uncertainties:[],suggestedTopics:[]};
+ return null;},{shouldMockEvents:true});createRoot(document.getElementById('root')).render(React.createElement(App));
+ </script></body></html>`);
+ const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','5202','--strictPort'],{windowsHide:true,stdio:'pipe'});let output='';server.stdout.on('data',s=>output+=s);server.stderr.on('data',s=>output+=s);let browser;
+ try{const url='http://127.0.0.1:5202/'+fixture;for(let i=0;i<80;i++){if(server.exitCode!==null)throw Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
+ browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:660,height:850}});page.setDefaultTimeout(7000);page.setDefaultNavigationTimeout(20000);await page.goto(url);
+ const guide=page.getByRole('region',{name:'首次使用指南'});await guide.waitFor();
+ assert.ok((await guide.innerText()).includes('ModelScope 国内镜像，通常无需 VPN'));
+ await guide.getByText('下载失败怎么办？也可使用浏览器下载',{exact:true}).click();
+ await guide.getByRole('button',{name:'浏览器下载所选模型',exact:true}).click();
+ await page.waitForFunction(()=>window.calls.some(c=>c.command==='plugin:shell|open'&&JSON.stringify(c.args).includes('modelscope.cn')));
+ assert.ok(await guide.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'manual download steps must fit a narrow window');
+ await guide.getByText('下载失败怎么办？也可使用浏览器下载',{exact:true}).click();
+ assert.equal(await guide.getByRole('button',{name:'使用 API（推荐）',exact:true}).getAttribute('aria-pressed'),'true');
+ assert.equal(await guide.getByRole('button',{name:'下载 Ollama',exact:true}).count(),0);
+ assert.equal(await guide.locator('[aria-label="已完成"]').count(),0);
+ await guide.getByRole('button',{name:'使用 API（推荐）',exact:true}).click();
+ await guide.getByRole('button',{name:'检测并连接',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='mvp_test_model_endpoint'));
+ await guide.getByText('聊天已连接',{exact:true}).waitFor();assert.equal(await guide.locator('[aria-label="已完成"]').count(),2);
+ await guide.getByRole('button',{name:'下载语音模型',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='download_local_stt_model'));
+ assert.equal(await guide.getByRole('button',{name:/下载中 · 正在连接/}).isDisabled(),true);
+ const progress=async(status,extra={})=>page.evaluate(({status,extra})=>window.progress({engine:'sherpa_bilingual',model_id:'paraformer-zh-en',percent:50,status,...extra}),{status,extra});
+ await progress('connecting_proxy');await guide.getByRole('button',{name:'直连失败，正在尝试系统/环境代理…',exact:true}).waitFor();
+ await page.evaluate(()=>window.progress({engine:'whisper_cpp',model_id:'small',percent:0,status:'error'}));assert.equal(await guide.getByRole('alert').count(),0);
+ await progress('error',{error:'SYNTHETIC_CONNECTION_TIMEOUT'});await guide.getByRole('alert').filter({hasText:'SYNTHETIC_CONNECTION_TIMEOUT'}).waitFor();
+ await guide.getByRole('button',{name:'下载语音模型',exact:true}).click();await progress('complete');await guide.getByRole('alert').filter({hasText:'未检测到完整模型'}).waitFor();
+ await guide.getByRole('button',{name:'下载语音模型',exact:true}).click();await progress('verifying');await guide.getByRole('button',{name:'正在校验模型…',exact:true}).waitFor();
+ await progress('extracting');await guide.getByRole('button',{name:'正在解压模型…',exact:true}).waitFor();await page.evaluate(()=>window.downloaded=true);await progress('complete');await guide.getByRole('button',{name:'语音模型已就绪',exact:true}).waitFor();
+ assert.equal(await guide.locator('[aria-label="已完成"]').count(),3);await guide.getByRole('button',{name:'选择语音模型路径',exact:true}).click();
+ await page.waitForFunction(()=>window.calls.some(c=>c.command==='save_local_stt_model_directory'));
+ await guide.getByRole('button',{name:'上传个人简历',exact:true}).click();await guide.getByRole('button',{name:'分析简历',exact:true}).waitFor();
+ await guide.getByRole('button',{name:'分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='plugin:dialog|ask'));
+ assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='practice_model').length),0,'refusal must block every resume model request');
+ await page.evaluate(()=>window.allowSending=true);await guide.getByRole('button',{name:'分析简历',exact:true}).click();await guide.getByText(/fixture.txt · 已保存分析/).waitFor();
+ const sent=await page.evaluate(()=>window.calls.find(c=>c.command==='practice_model'));assert.equal(sent.args.endpoint.api,'deepseek');assert.equal(sent.args.input.consentToSendResume,true);assert.equal(sent.args.input.resumeText,'SYNTHETIC_RESUME_ONLY');
+ assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_local_service').length),0,'API branch must never start Ollama');
+ await guide.getByRole('button',{name:'重新分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.filter(c=>c.command==='plugin:dialog|ask').length===3);
+ await guide.getByRole('button',{name:'资料已填写 / 暂时跳过',exact:true}).click();await guide.getByRole('button',{name:'已完成效果测试',exact:true}).click();assert.equal(await guide.locator('[aria-label="已完成"]').count(),5);
+ assert.ok(await guide.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'narrow guide must not overflow');await page.screenshot({path:'outputs/onboarding-api-narrow.png'});
+ await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).click();await guide.getByRole('button',{name:'下载 Ollama',exact:true}).waitFor();await guide.getByRole('button',{name:'连接并启动 Ollama',exact:true}).click();await guide.getByRole('button',{name:'Ollama 已连接',exact:true}).waitFor();
+ await guide.getByRole('button',{name:'下载本地生成模型',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='pull_ollama_model'));
+ await guide.getByRole('button',{name:'高级设置：Ollama 路径',exact:true}).click();await page.getByPlaceholder('自动检测或选择 ollama.exe',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();await page.reload();await guide.waitFor();assert.ok(await guide.getByRole('button',{name:'重新检查资料',exact:true}).count());assert.ok(await guide.getByRole('button',{name:'重新测试',exact:true}).count());
+ await page.goto(url+'?legacy=1');await guide.waitFor();
+ assert.equal(await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).getAttribute('aria-pressed'),'true');
+ await page.waitForFunction(()=>window.calls.some(c=>c.command==='mvp_list_models'));
+ const legacy=await page.evaluate(()=>window.calls.find(c=>c.command==='mvp_list_models').args.endpoint);assert.equal(legacy.baseUrl,'http://127.0.0.1:11434');assert.equal(legacy.model,'qwen3:4b-instruct');assert.equal(await guide.getByRole('combobox',{name:'指南语音模型'}).inputValue(),'small');
+ await page.goto(url);await guide.waitFor();await page.evaluate(()=>window.downloaded=true);
+ await guide.getByRole('button',{name:'打开模型与服务',exact:true}).click();
+ await page.getByRole('button',{name:'重新检测',exact:true}).click();
+ const removeSpeech=page.getByRole('button',{name:'删除所选语音模型',exact:true});await removeSpeech.waitFor();
+ await removeSpeech.click();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='delete_local_stt_model').length),0,'refusal does not delete speech files');
+ await page.evaluate(()=>window.allowSending=true);await removeSpeech.click();await page.getByText(/已删除模型 paraformer-zh-en/).waitFor();assert.equal(await removeSpeech.count(),0);
+ assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='delete_local_stt_model').length),1);
+ await page.getByText('管理已下载的本地生成模型（Ollama）',{exact:true}).click();
+ await page.getByRole('button',{name:'检测已下载的 Ollama 模型',exact:true}).click();
+ const removeOllama=page.getByRole('button',{name:'删除所选 Ollama 模型',exact:true});await page.waitForFunction(()=>!!document.querySelector('option[value="qwen3:4b-instruct"]'));
+ await page.evaluate(()=>window.allowSending=false);await removeOllama.click();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='delete_ollama_model').length),0);
+ await page.evaluate(()=>window.allowSending=true);await removeOllama.click();await page.getByText(/已删除模型 qwen3:4b-instruct/).waitFor();assert.equal(await removeOllama.isDisabled(),true);
+ const removed=await page.evaluate(()=>window.calls.find(c=>c.command==='delete_ollama_model').args);assert.equal(removed.model,'qwen3:4b-instruct');assert.equal(removed.baseUrl,'http://127.0.0.1:11434');
+ await browser.close();browser=null;
+ }finally{if(browser)await browser.close();server.kill();await unlink(fixture).catch(()=>{});}
+});

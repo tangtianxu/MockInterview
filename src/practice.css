@@ -55,6 +55,17 @@
 .practice-reference-answer{padding:0 0 18px;border-bottom:1px solid #2f4854;overflow-wrap:anywhere}
 .practice-reference-answer p{white-space:pre-wrap;font-size:13px;line-height:1.85}
 .practice-reference-error{color:#eab9a3}
+.guide-check{display:inline-flex;width:22px;color:#849ca7}.guide-check.complete{color:#48d2aa}
+.guide-branches{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.guide-comparison{padding:8px 12px;border:1px solid #31534b;border-radius:10px;background:#17312f}
+.theme-light .guide-comparison{background:#eaf5ee;border-color:#bfdac9}
+.setup-guide label{display:block;margin:12px 0;font-size:12px}
+.setup-guide input:not([type=checkbox]),.setup-guide select{box-sizing:border-box;width:100%;max-width:100%;margin-top:7px;padding:10px;border:1px solid #31534b;border-radius:8px;background:#0c1721;color:inherit}
+.theme-light .setup-guide input:not([type=checkbox]),.theme-light .setup-guide select{background:#fffefa;border-color:#bfdac9}
+.setup-guide .guide-optional{display:flex;align-items:center;gap:8px}
+.setup-guide .setting-group{margin:14px 0;padding:12px;min-width:0}
+.setup-guide .setup-actions,.setup-guide .key-actions,.setup-guide .setup-guide-actions{display:flex;flex-wrap:wrap;gap:8px}
+.setup-guide button{max-width:100%;white-space:normal}
 .practice-history-reference{padding:10px 14px;border:1px solid #2f4854;border-radius:10px;color:#afd8cb;font-size:12px}
 .practice-history-reference summary{cursor:pointer}.practice-history-reference p{white-space:pre-wrap;line-height:1.8}
 .theme-light .practice-knowledge-point{background:#edf5ef;border-color:#c4dcd0}

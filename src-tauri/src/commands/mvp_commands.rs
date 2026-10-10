@@ -511,11 +511,8 @@ pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: Prac
         return Err("练习范围、难度或时长无效".into());
     }
     input.context.authorize(endpoint.api == "ollama")?;
-    if input.action == "analyze" && endpoint.api != "ollama" {
-        return Err("简历分析只允许使用本地 Ollama".into());
-    }
     if input.action == "ask" && matches!(input.context.scope.as_str(), "project" | "mixed" | "comprehensive") && input.context.resume_analysis.trim().is_empty() {
-        return Err("项目、混合或综合练习需要先用本地模型分析简历".into());
+        return Err("项目、混合或综合练习需要先分析简历".into());
     }
     if input.action == "analyze" && input.context.resume_text.trim().is_empty() {
         return Err("请先导入简历".into());

@@ -570,6 +570,7 @@ pub fn run() {
             model_commands::download_local_stt_model,
             model_commands::cancel_model_download,
             model_commands::delete_local_stt_model,
+            model_commands::delete_ollama_model,
             // == COMMANDS: stealth ==
             stealth_commands::get_privacy_display_state,
             stealth_commands::set_capture_exclusion,

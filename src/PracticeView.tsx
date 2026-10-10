@@ -6,7 +6,7 @@ import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "luci
 import "./practice.css";
 import { MathText } from "./MathText";
 import type {HistoryRecorder} from "./history";
-import {SetupGuide} from "./SetupGuide";
+import {SetupGuide,type GuideSetup} from "./SetupGuide";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
@@ -40,14 +40,14 @@ function minutesLabel(seconds: number) {
 
 export function PracticeView({model, domain, liveRunning, stt, personalization, onSessionActiveChange,
   resume, analysis, onResumeImported, onAnalysis, onClearResume, role, topics, onRoleChange, onTopicsChange,
-  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings,history}: {model: ModelEndpoint; domain: string;
+  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings,history,guideSetup}: {model: ModelEndpoint; domain: string;
   liveRunning: boolean; stt: SttSettings; personalization?: string; onSessionActiveChange?: (active:boolean)=>void;
   resume: Resume|null; analysis: Analysis|null; onResumeImported:(path:string,resume:Resume)=>void;
   onAnalysis:(analysis:Analysis)=>void; onClearResume:()=>void; role:string; topics:string;
   onRoleChange:(value:string)=>void; onTopicsChange:(value:string)=>void;
   setupVisible?:boolean; feedbackVisible?:boolean; resumePath?:string; resumeError?:string;
   onPreviewChange?:(preview:{question:string;hint:string})=>void;
-  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void;history:HistoryRecorder}) {
+  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void;history:HistoryRecorder;guideSetup:GuideSetup}) {
   const [guideVisible,setGuideVisible]=useState(()=>localStorage.getItem("mockInterview.setupGuideSeen")!=="1");
   const dismissGuide=()=>{localStorage.setItem("mockInterview.setupGuideSeen","1");setGuideVisible(false);};
   const [config, setConfig] = useState<PracticeConfig>(loadConfig);
@@ -98,7 +98,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const includesResume=!!(background.resumeText || background.resumeAnalysis);
     if(!includesResume && !projectQuestion)return false;
     const destination=(()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
-    const agreed=await confirmSend(`本次${label}会将领域、岗位、主题及当前问题${label==="评价" ? "与你的作答" : ""}${includesResume ? "、简历摘录（最多 8,000 字）和本地分析" : "（可能包含项目相关信息）"}发送至 ${destination}。仅本次授权，是否继续？`,
+    const content=label==="简历分析" ? "简历文字（最多 12,000 字）" : `领域、岗位、主题及当前问题${label==="评价" ? "与你的作答" : ""}${includesResume ? "、简历摘录（最多 8,000 字）和已保存的分析" : "（可能包含项目相关信息）"}`;
+    const agreed=await confirmSend(`本次${label}会将${content}发送至 ${destination}。仅本次授权，是否继续？`,
       {title:"确认本次背景发送",kind:"warning"});
     if(!agreed)throw new Error("已取消本次请求");
     return agreed;
@@ -107,7 +108,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const epoch=sessionEpochRef.current;
     if (local) await invoke("start_local_service",{service:"ollama"});
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
-    const consentToSendResume=action==="analyze" ? false : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
+    const consentToSendResume=action==="analyze" ? await authorizeBackground({...background,resumeText:String(fields.resumeText || ""),resumeAnalysis:""},"简历分析") : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     return invoke<Record<string,unknown>>("practice_model",{endpoint:history.endpoint(model,action==="ask"?"练习出题":action==="evaluate"?"练习评价":"简历分析"),input:{
       ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
@@ -332,14 +333,13 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       </div>
       <div className="practice-options">
         <h2>简历背景 <span>可选</span></h2>
-        <p>支持 PDF、DOCX、TXT、MD。记住所选路径，重启后只读重新加载；简历分析只允许本地 Ollama。</p>
+        <p>支持 PDF、DOCX、TXT、MD。记住所选路径，重启后重新加载。可使用当前 API 或本地模型分析；API 每次发送简历内容前单独确认。</p>
         <button className="practice-secondary" disabled={updating || !!busy || active} onClick={()=>void importResume()}><FileText size={16}/> {resume ? "重新选择简历" : "选择简历"}</button>
         {resume && <p className="practice-file">{resume.name}{resume.truncated ? " · 仅使用前 1.2 万字" : ""}</p>}
         {resumePath && !resume && <p className="practice-warning">{resumeError || "正在重新读取已保存的简历…"}</p>}
         {resumePath && <button className="practice-secondary" disabled={updating || !!busy || active} onClick={onClearResume}>移除已保存简历</button>}
-        {resume && <button className="practice-secondary" disabled={updating || !!busy || !local || active} onClick={()=>void analyzeResume()}>
+        {resume && <button className="practice-secondary" disabled={updating || !!busy || active} onClick={()=>void analyzeResume()}>
           <Sparkles size={16}/> {busy === "analyze" ? "正在分析…" : "分析简历"}</button>}
-        {resume && !local && <p className="practice-warning">分析简历需先用本地 Ollama；已有本地分析可继续用 API 练习项目题，每次发送摘录前单独确认。</p>}
         {!local && <p>技术题练习会把问题与回答发送给所选回答 API；简历内容不会发送。</p>}
         {local && personalization && <p>已沿用个人资料中的个性化回答偏好调整选题；这段偏好不作为简历事实。</p>}
         {analysis && <div className="practice-analysis"><strong>简历分析</strong><p>{analysis.summary}</p>
@@ -354,7 +354,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <span>{turns.length} 题已答 · 平均 {average}/5</span>
       </div>
       <div className="practice-conversation">
-        {guideVisible && !active && !busy && <SetupGuide onSettings={onModelSettings} onDismiss={dismissGuide}/>}
+        {guideVisible && !active && <SetupGuide setup={{...guideSetup,blocked:guideSetup.blocked || !!busy || micStarting,resumeName:resume?.name || "",resumeAnalyzed:!!analysis,analyzing:busy==="analyze",onResume:()=>void importResume(),onAnalyze:()=>void analyzeResume()}} onSettings={onModelSettings} onDismiss={dismissGuide}/>}
         {turns.map((turn,index)=><div className="practice-turn" key={turn.id}>
           <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p><MathText text={turn.question}/></p></div>
           <div className="practice-bubble candidate"><small>我的回答</small><p><MathText text={turn.answer}/></p></div>
