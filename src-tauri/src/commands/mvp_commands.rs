@@ -17,7 +17,11 @@ pub struct ModelEndpoint {
     pub base_url: String,
     pub model: String,
     pub credential_slot: Option<String>,
+    pub history_session_id: Option<String>,
+    pub usage_stage: Option<String>,
 }
+
+fn save_usage(app:&AppHandle,endpoint:&ModelEndpoint,value:&serde_json::Value){super::history_commands::record_usage(app,endpoint.history_session_id.as_deref(),endpoint.usage_stage.as_deref().unwrap_or("模型请求"),&endpoint.model,&endpoint.api,value);}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,6 +231,7 @@ async fn chat(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &st
     }
     let value: serde_json::Value = response.error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
+    save_usage(app,endpoint,&value);
     let content = if endpoint.api == "ollama" { value["message"]["content"].as_str() }
         else { value["choices"][0]["message"]["content"].as_str() };
     content.map(str::to_string).ok_or("判别模型没有返回文字".into())
@@ -340,7 +345,7 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
             "think":false,"options":{"temperature":0.2,"num_predict":token_limit}})
     } else if endpoint.api == "deepseek" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
-            "thinking":{"type":"disabled"},"max_tokens":token_limit})
+            "thinking":{"type":"disabled"},"max_tokens":token_limit,"stream_options":{"include_usage":true}})
     } else {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
             "temperature":0.2,"max_tokens":token_limit})
@@ -387,6 +392,19 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
                 "phase":phase, "elapsedMs":elapsed_ms, "duration":true}));
         }
         let outcome = decoder.outcome();
+        if decoder.usage().is_some() || endpoint.api!="deepseek" {
+            save_usage(&app,&endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));
+        }else{
+            // Usage is a trailing SSE frame. Collect it without delaying the
+            // visible answer completion or issuing another model request.
+            let stats_app=app.clone();let stats_endpoint=endpoint.clone();
+            tokio::spawn(async move {
+                let _=tokio::time::timeout(Duration::from_secs(5),async{
+                    while let Some(Ok(chunk))=stream.next().await {decoder.push(&chunk);if decoder.usage().is_some(){break;}}
+                }).await;
+                save_usage(&stats_app,&stats_endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));
+            });
+        }
         log::info!("Answer stream: budget={token_limit}, received_chars={received_chars}, outcome={:?}", outcome);
         outcome
     }.await;
@@ -421,6 +439,7 @@ pub async fn mvp_explain(app: AppHandle, endpoint: ModelEndpoint, question: Stri
         .send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
+    save_usage(&app,&endpoint,&value);
     let reason = if endpoint.api == "ollama" { value["done_reason"].as_str() }
         else { value["choices"][0]["finish_reason"].as_str() };
     if let Some(error) = reason.and_then(finish_error) { return Err(error.into()); }
@@ -598,6 +617,7 @@ async fn practice_json(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, 
     }
     let value: serde_json::Value = response.error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
+    save_usage(app,endpoint,&value);
     let raw = if endpoint.api == "ollama" { value["message"]["content"].as_str() }
         else { value["choices"][0]["message"]["content"].as_str() }
         .ok_or("模型没有返回练习内容")?;
@@ -624,18 +644,18 @@ mod tests {
     }
     #[test]
     fn endpoints_require_tls_for_remote_services() {
-        let endpoint = ModelEndpoint{api:"ollama".into(),base_url:"https://example.com".into(),model:"x".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"ollama".into(),base_url:"https://example.com".into(),model:"x".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert!(endpoint_url(&endpoint,"chat").is_err());
-        let endpoint = ModelEndpoint{api:"ollama".into(),base_url:"http://127.0.0.1:11434".into(),model:"x".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"ollama".into(),base_url:"http://127.0.0.1:11434".into(),model:"x".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert_eq!(endpoint_url(&endpoint,"chat").unwrap(),"http://127.0.0.1:11434/api/chat");
-        let endpoint = ModelEndpoint{api:"openai".into(),base_url:"http://example.com/v1".into(),model:"x".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"openai".into(),base_url:"http://example.com/v1".into(),model:"x".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert!(endpoint_url(&endpoint,"chat").is_err());
-        let endpoint = ModelEndpoint{api:"openai".into(),base_url:"https://example.com/v1".into(),model:"x".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"openai".into(),base_url:"https://example.com/v1".into(),model:"x".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert_eq!(endpoint_url(&endpoint,"chat").unwrap(),"https://example.com/v1/chat/completions");
-        let endpoint = ModelEndpoint{api:"deepseek".into(),base_url:"https://api.deepseek.com".into(),model:"deepseek-flash".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"deepseek".into(),base_url:"https://api.deepseek.com".into(),model:"deepseek-flash".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert_eq!(endpoint_url(&endpoint,"models").unwrap(),"https://api.deepseek.com/models");
         assert_eq!(endpoint_url(&endpoint,"chat").unwrap(),"https://api.deepseek.com/chat/completions");
-        let endpoint = ModelEndpoint{api:"deepseek".into(),base_url:"https://example.com".into(),model:"deepseek-flash".into(),credential_slot:None};
+        let endpoint = ModelEndpoint{api:"deepseek".into(),base_url:"https://example.com".into(),model:"deepseek-flash".into(),credential_slot:None,history_session_id:None,usage_stage:None};
         assert!(endpoint_url(&endpoint,"chat").is_err());
     }
 }

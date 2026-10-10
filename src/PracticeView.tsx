@@ -5,6 +5,7 @@ import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialo
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
 import { MathText } from "./MathText";
+import type {HistoryRecorder} from "./history";
 import {SetupGuide} from "./SetupGuide";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
@@ -39,14 +40,14 @@ function minutesLabel(seconds: number) {
 
 export function PracticeView({model, domain, liveRunning, stt, personalization, onSessionActiveChange,
   resume, analysis, onResumeImported, onAnalysis, onClearResume, role, topics, onRoleChange, onTopicsChange,
-  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings}: {model: ModelEndpoint; domain: string;
+  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings,history}: {model: ModelEndpoint; domain: string;
   liveRunning: boolean; stt: SttSettings; personalization?: string; onSessionActiveChange?: (active:boolean)=>void;
   resume: Resume|null; analysis: Analysis|null; onResumeImported:(path:string,resume:Resume)=>void;
   onAnalysis:(analysis:Analysis)=>void; onClearResume:()=>void; role:string; topics:string;
   onRoleChange:(value:string)=>void; onTopicsChange:(value:string)=>void;
   setupVisible?:boolean; feedbackVisible?:boolean; resumePath?:string; resumeError?:string;
   onPreviewChange?:(preview:{question:string;hint:string})=>void;
-  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void}) {
+  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void;history:HistoryRecorder}) {
   const [guideVisible,setGuideVisible]=useState(()=>localStorage.getItem("mockInterview.setupGuideSeen")!=="1");
   const dismissGuide=()=>{localStorage.setItem("mockInterview.setupGuideSeen","1");setGuideVisible(false);};
   const [config, setConfig] = useState<PracticeConfig>(loadConfig);
@@ -108,7 +109,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     const consentToSendResume=action==="analyze" ? false : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
-    return invoke<Record<string,unknown>>("practice_model",{endpoint:model,input:{
+    return invoke<Record<string,unknown>>("practice_model",{endpoint:history.endpoint(model,action==="ask"?"练习出题":action==="evaluate"?"练习评价":"简历分析"),input:{
       ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
       consentToSendResume,history:"",askedQuestions:[],question:"",questionKind:"",answer:"",...fields,
     }});
@@ -155,6 +156,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       const stop=await listen<{requestId:string;token:string}>("mvp_answer_token",event=>{
         if(!stillCurrent() || event.payload.requestId!==current.id)return;
         current.text+=event.payload.token;
+        history.record("answer",current.text,{question:currentQuestion.question,complete:false,source:local?"local":"api"},current.id,true);
         setReference({text:current.text,loading:true,error:""});
         setTurns(value=>{
           const next=value.map(turn=>turn.id===turnId ? {...turn,reference:current.text} : turn);
@@ -163,10 +165,11 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       });
       if(!stillCurrent()){stop();return;}
       referenceStopsRef.current.push(stop);
-      await invoke("mvp_answer",{endpoint:model,requestId:current.id,question:currentQuestion.question,
+      await invoke("mvp_answer",{endpoint:history.endpoint(model,"参考生成"),requestId:current.id,question:currentQuestion.question,
         focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
         practiceContext:{...background,preferences:local ? background.preferences : "",consentToSendResume}});
       if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
+      if(stillCurrent())history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:local?"local":"api"},current.id);
     }catch(cause){if(stillCurrent()){
       setReference(value=>({...value,error:`参考生成失败：${String(cause)}`}));
       setTurns(value=>{
@@ -183,6 +186,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     }
   };
   const endSession=()=>{
+    history.end();
     setActive(false);sessionEpochRef.current++;operationRef.current.reset();setBusy(null);
     if(referenceRequestRef.current)cancelReference();
     if(micOnRef.current)void stopMic();
@@ -193,13 +197,14 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     cancelReference();
     setBusy("question");setError("");
     try {
-      const history=practiceHistory(previous);
+      const recentHistory=practiceHistory(previous);
       const background=currentBackground();
-      const value = await request("ask",history,background) as Question;
+      const value = await request("ask",recentHistory,background) as Question;
       if(!operationRef.current.current(token))return false;
-      if(!value.question?.trim() || repeatedPracticeQuestion(value.question,history.askedQuestions))
+      if(!value.question?.trim() || repeatedPracticeQuestion(value.question,recentHistory.askedQuestions))
         throw new Error("服务返回了空题目或重复题目，已阻止展示，请重试下一题。");
       setQuestion({...value,background});setFeedback(null);setDraft("");
+      history.record("question",value.question,{topic:value.topic||""});
       return true;
     } catch (cause) {if(operationRef.current.current(token))setError(`生成问题失败：${String(cause)}`);return false;}
     finally {if(operationRef.current.finish(token))setBusy(null);}
@@ -210,8 +215,10 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if (liveRunning) {setError("请先结束实时聆听，再开始模拟练习。");return;}
     if (config.scope !== "technical" && !analysis) {setError("项目、混合或综合练习需要先导入并分析简历。");return;}
     const epoch=++sessionEpochRef.current;cancelReference();turnsRef.current=[];
+    history.begin("practice",`模拟练习${role?` · ${role}`:""}${topics?` · ${topics}`:""}`);
     setTurns([]);setQuestion(null);setFeedback(null);setRemaining(config.minutes*60);
     const started=await ask([]);
+    if(!started)history.end();
     if(epoch===sessionEpochRef.current){if(started)setActive(true);else setRemaining(0);}
   };
   const submit = async () => {
@@ -220,6 +227,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if(token===null)return;
     const currentQuestion=question;
     const currentAnswer=draft.trim();
+    const turnId=crypto.randomUUID();
+    history.record("transcript",currentAnswer,{speaker:"User",question:currentQuestion.question},turnId);
     const epoch=sessionEpochRef.current;
     if (micOnRef.current) await stopMic();
     setBusy("feedback");setError("");
@@ -228,8 +237,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       if(!operationRef.current.current(token))return;
       const result = value as Feedback;
       setFeedback(result);
-      const turnId=crypto.randomUUID();
       const next=[...turnsRef.current,{id:turnId,question:currentQuestion.question,answer:currentAnswer,feedback:result}];
+      history.record("feedback",`参考评分 ${result.score}/5`,{question:currentQuestion.question,feedback:result},`${turnId}-feedback`);
       turnsRef.current=next;setTurns(next);
       // Knowledge questions automatically receive an independent reference answer.
       // Project-related questions require an explicit action/consent for the extra call.
@@ -293,6 +302,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     }
   };
   useEffect(() => () => {
+    history.end();
     sessionEpochRef.current++;operationRef.current.reset();
     const referenceRequest=referenceRequestRef.current;referenceRequestRef.current=null;
     if(referenceRequest)void invoke("mvp_cancel_answer",{requestId:referenceRequest.id}).catch(()=>{});

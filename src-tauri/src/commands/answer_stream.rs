@@ -30,11 +30,12 @@ pub(super) struct AnswerStream {
     ended: bool,
     error: Option<&'static str>,
     timings: Vec<(&'static str, u64)>,
+    usage: Option<serde_json::Value>,
 }
 
 impl AnswerStream {
     pub fn new(ollama: bool) -> Self {
-        Self { ollama, pending: Vec::new(), ended: false, error: None, timings: Vec::new() }
+        Self { ollama, pending: Vec::new(), ended: false, error: None, timings: Vec::new(),usage:None }
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
@@ -57,6 +58,7 @@ impl AnswerStream {
     pub fn is_finished(&self) -> bool { self.ended }
 
     pub fn timings(&self) -> &[(&'static str, u64)] { &self.timings }
+    pub fn usage(&self)->Option<&serde_json::Value>{self.usage.as_ref()}
 
     pub fn outcome(&self) -> Result<(), String> {
         if let Some(error) = self.error { return Err(error.into()); }
@@ -83,6 +85,7 @@ impl AnswerStream {
         if !value["error"].is_null() {
             self.error.get_or_insert("回答服务返回错误，内容未生成完；请检查模型连接后重试。");
         }
+        if value["usage"].is_object() || (self.ollama && value["done"].as_bool()==Some(true)){self.usage=Some(value.clone());}
         let token = if self.ollama { value["message"]["content"].as_str() }
             else { value["choices"][0]["delta"]["content"].as_str() };
         if let Some(token) = token.filter(|token| !token.is_empty()) { tokens.push(token.into()); }
@@ -105,6 +108,16 @@ impl AnswerStream {
 #[cfg(test)]
 mod tests {
     use super::{AnswerStream,AnswerCancellation};
+
+    #[test]
+    fn usage_after_finish_reason_is_preserved_without_counting_null_frames() {
+        let mut stream=AnswerStream::new(false);
+        stream.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}],\"usage\":null}\n");
+        assert!(stream.is_finished());assert!(stream.usage().is_none());
+        stream.push(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":9,\"prompt_cache_hit_tokens\":80}}\n");
+        assert_eq!(stream.usage().unwrap()["usage"]["prompt_tokens"],100);
+        assert_eq!(stream.usage().unwrap()["usage"]["prompt_cache_hit_tokens"],80);
+    }
 
     #[tokio::test]
     async fn cancellation_wakes_pending_waits_and_remembers_early_cancellation() {

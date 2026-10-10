@@ -21,6 +21,7 @@ use tauri::{
 
 // == MODULE COMMANDS: audio ==
 use commands::audio_commands;
+use commands::history_commands;
 // == MODULE COMMANDS: stt ==
 use commands::stt_commands;
 // == MODULE COMMANDS: llm ==
@@ -493,6 +494,13 @@ pub fn run() {
             local_runtime_commands::local_stt_model_directory,
             local_runtime_commands::save_local_stt_model_directory,
             local_runtime_commands::pull_ollama_model,
+            history_commands::history_begin,
+            history_commands::history_record,
+            history_commands::history_end,
+            history_commands::history_list,
+            history_commands::history_read,
+            history_commands::history_delete,
+            history_commands::history_export,
             // == COMMANDS: intelligence ==
             intelligence_commands::generate_assist,
             intelligence_commands::cancel_generation,

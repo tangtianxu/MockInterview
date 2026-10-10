@@ -2,6 +2,10 @@
 .practice-setup,.practice-dialogue,.practice-feedback{min-height:0;overflow-y:auto}
 .practice-setup{display:flex;flex-direction:column;gap:16px;padding:22px 17px;background:#0d1522;border-right:1px solid #202b3b}
 .practice-hero{min-height:210px}
+.history-save-error{margin:8px 20px;padding:10px}
+.history-view{display:flex;flex-direction:column;gap:14px}.history-view label{display:flex;flex-direction:column;gap:8px}
+.history-list{display:flex;flex-direction:column;gap:8px}.history-session{display:flex;flex-direction:column;align-items:flex-start;text-align:left;gap:6px;background:transparent;border:1px solid #48615d;color:inherit;padding:12px;border-radius:10px;overflow-wrap:anywhere}
+.history-session span,.history-entry small{font-size:12px;opacity:.8}.history-entry{margin:16px 0;padding:14px;border:1px solid #48615d;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}.history-entry h4{margin:12px 0}.history-entry pre{white-space:pre-wrap;font-size:12px}.history-table{overflow-x:auto}.history-table table{width:100%;border-collapse:collapse;font-size:12px}.history-table th,.history-table td{padding:8px;border:1px solid #48615d;white-space:nowrap}
 .practice-hero .practice-secondary{margin-top:14px}
 .setup-guide{padding:20px;border:1px solid #2c4b48;border-radius:16px;background:rgba(91,212,183,.06);line-height:1.7;overflow-wrap:anywhere;min-width:0}
 .setup-guide h3{margin:6px 0 10px;font-size:20px}.setup-guide h4{margin:0 0 6px;font-size:14px}

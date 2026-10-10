@@ -16,6 +16,8 @@ import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
+import {useHistoryRecorder} from "./history";
+import {HistoryView} from "./HistoryView";
 import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
@@ -42,6 +44,7 @@ type Settings = {
   theme: "dark" | "light"; opacity: number;
   targetRole: string; focusTopics: string; resumePath: string;
   micTranscription:boolean; selfIntroduction:string;
+  decisionFinalOnly:boolean;
 };
 type SavedProfile = {settings:Settings;resumeAnalysis:{hash:string;analysis:Analysis}|null;
   practiceConfig?:PracticeConfig|null};
@@ -64,7 +67,7 @@ const defaults: Settings = {
   launcherOnTop: false, quitShortcut: "Control+Backquote",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
-  micTranscription:true, selfIntroduction:"",
+  micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,
   decision: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answer: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"auto"},
   answerInstructions: "",
@@ -94,6 +97,7 @@ function loadSettings(input?: unknown): Settings {
     const sharedModelConnection=sharedConnectionDefault(old);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
       micTranscription:old.micTranscription!==false,
+      decisionFinalOnly:old.decisionFinalOnly===true,
       selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
       parallelAnswer:old.parallelAnswer===true,
       parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
@@ -335,7 +339,10 @@ function Main() {
   const [systemLevel, setSystemLevel] = useState(0);
   const [locked, setLocked] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"display" | "audio" | "profile" | "models" | "updates" | "diagnostics">("display");
+  const [settingsTab, setSettingsTab] = useState<"display" | "audio" | "profile" | "models" | "updates" | "diagnostics" | "history">("display");
+  const {recorder:liveHistory,error:historyError}=useHistoryRecorder();
+  const [historyNativeError,setHistoryNativeError]=useState("");
+  const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
   const [showDetail, setShowDetail] = useState(false);
   const [download, setDownload] = useState("");
   const [overlayVisible, setOverlayVisible] = useState(false);
@@ -434,6 +441,7 @@ function Main() {
     return()=>window.clearTimeout(timer);
   },[settings,resumeAnalysis,practiceConfigEpoch,profileReady,profileWritable]);
   const flushProfile=useCallback(async()=>{
+    await liveHistory.flush();await practiceHistoryRecorder.flush();
     if(!profileWritableRef.current)return;
     const profile:SavedProfile={settings:settingsRef.current,resumeAnalysis:savedResumeAnalysis(),practiceConfig:savedPracticeConfig()};
     const save=profileWriteQueueRef.current.catch(()=>{}).then(()=>invoke("save_interview_profile",{profile}));
@@ -442,7 +450,7 @@ function Main() {
   quitRef.current=async()=>{
     if(quittingRef.current)return;
     quittingRef.current=true;
-    try {await flushProfile();await exit(0);}
+    try {liveHistory.end();practiceHistoryRecorder.end();await flushProfile();await exit(0);}
     catch(cause){setProfileError(`关闭前保存配置失败，程序仍保持打开：${String(cause)}`);}
     finally{quittingRef.current=false;}
   };
@@ -929,6 +937,7 @@ function Main() {
   }, [publishHint,markVisible]);
   const cancelAnswer = useCallback(() => {
     for(const branch of answerRaceRef.current?.branches || []) {
+      if(!branch.done && branch.text)liveHistory.record("answer",branch.text,{question:answerDisplayRef.current?.question||questionRef.current,source:branch.source,complete:false,cancelled:true},branch.id);
       if(!branch.done)void invoke("mvp_cancel_answer",{requestId:branch.id}).catch(()=>{});
     }
     answerRaceRef.current=null;answerRequestRef.current="";setApiPending(false);
@@ -938,6 +947,7 @@ function Main() {
     const race=answerRaceRef.current;
     if(!race || !race.finish(id,error,Math.round(performance.now()-answerStartedRef.current)))return;
     const branch=race.branches.find(item=>item.id===id)!;
+    liveHistory.record("answer",branch.text,{question:questionRef.current,source:branch.source,complete:!branch.error,error:branch.error||null},id);
     const elapsed=Math.round(performance.now()-answerStartedRef.current);
     logDiagnostic(branch.error ? "回答分路失败" : "回答分路完成",
       `${branch.source=== "local" ? "本地" : "API"} · ${elapsed} ms${branch.error ? ` · ${branch.error}` : ""}`);
@@ -963,10 +973,12 @@ function Main() {
   const startAnswer = useCallback(async (nextQuestion: string, focus: string[], keyTerms: string[],
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
     if(softwareUpdatingRef.current)return;
+    liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
+    liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
     const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
     const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
       source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
@@ -993,7 +1005,7 @@ function Main() {
         }
         if(answerRaceRef.current!==race)return;
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
-        await invoke("mvp_answer",{endpoint:endpoint(config,"answer"),requestId:id,
+        await invoke("mvp_answer",{endpoint:liveHistory.endpoint(endpoint(config,"answer"),"回答生成"),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
           answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
       }catch(cause){if(answerRaceRef.current===race)finishAnswer(id,String(cause));}
@@ -1006,6 +1018,9 @@ function Main() {
     pendingDisplayRef.current=null;pendingHintRef.current="";
     const question="请进行自我介绍";
     const text=settingsRef.current.selfIntroduction.trim() || "尚未保存自我介绍，请在设置 → 个人资料 → 自我介绍中填写。";
+    liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
+    liveHistory.record("question",question);
+    liveHistory.record("answer",text,{question,source:"saved",complete:true});
     const startedAt=performance.now();const requestId=crypto.randomUUID();
     answerStartedRef.current=startedAt;answerTaskRef.current="self_introduction";
     questionRef.current=question;activeSourceRef.current=sourceId;uncertainRef.current=[];
@@ -1045,9 +1060,10 @@ function Main() {
     try {
       const background=topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
         settingsRef.current.answer.api==="ollama");
-      const explanation=await invoke<string>("mvp_explain",{endpoint:endpoint(settingsRef.current.answer,"answer"),
+      const explanation=await invoke<string>("mvp_explain",{endpoint:liveHistory.endpoint(endpoint(settingsRef.current.answer,"answer"),"补充解释"),
         question,keyTerms:visibleKeyTermsRef.current,summary,
         answerInstructions:[settingsRef.current.answerInstructions,background && `术语背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
+      liveHistory.record("detail",explanation,{question});
       if (detailRequestRef.current===requestId && visibleQuestionRef.current===question) setDetail(explanation);
     } catch (cause) {
       if (detailRequestRef.current===requestId) setDetail(`原理解释失败：${String(cause)}`);
@@ -1080,7 +1096,7 @@ function Main() {
       const recent=dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],
         pending.sourceId,settingsRef.current.mode==="video");
       const decision = await invoke<Decision>("mvp_decide", {
-        endpoint:endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),
+        endpoint:liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别"),
         input:{ context:recent, currentText:pending.text, previousQuestion:questionRef.current,
           candidateReply:micPartialRef.current?.text || [...segmentsRef.current].reverse().find(item=>item.speaker==="User")?.text || "",
           visibleQuestion:visibleQuestionRef.current, isFinal:pending.isFinal,
@@ -1133,6 +1149,7 @@ function Main() {
   };
 
   const queueDecision = useCallback((segment: Segment, isFinal: boolean) => {
+    if(settingsRef.current.decisionFinalOnly && !isFinal)return;
     const text = segment.text;
     const normalized = text.trim();
     const decisionKey = `${segment.id}:${isFinal ? "final" : "partial"}:${normalized}`;
@@ -1149,6 +1166,7 @@ function Main() {
   useEffect(() => {
     let active = true; const stops: UnlistenFn[] = [];
     const register = async () => {
+      stops.push(await listen<string>("history_save_error",event=>{if(active)setHistoryNativeError(`历史用量保存失败：${event.payload}`);}));
       stops.push(await listen<{segment:Segment}>("transcript_update", event => {
         if (!active || !runningRef.current) return;
         const segment = event.payload.segment;
@@ -1161,6 +1179,7 @@ function Main() {
       stops.push(await listen<{segment:Segment}>("transcript_final", event => {
         if (!active || !runningRef.current) return;
         const segment = event.payload.segment;
+        liveHistory.record("transcript",segment.text,{speaker:segment.speaker,timestampMs:segment.timestamp_ms},segment.id);
         if(segment.speaker==="User"){
           if(settingsRef.current.mode!=="live" || !settingsRef.current.micTranscription)return;
           micPartialRef.current=null;setMicPartial(null);
@@ -1211,6 +1230,7 @@ function Main() {
         const first=branch.firstMs===null;
         const elapsed=Math.round(performance.now()-answerStartedRef.current);
         if(!race.token(branch.id,event.payload.token,elapsed))return;
+        liveHistory.record("answer",branch.text,{question:answerDisplayRef.current?.question||questionRef.current,source:branch.source,complete:false},branch.id,true);
         if(first)logDiagnostic("模型首字",`${branch.source=== "local" ? "本地" : "API"} · ${elapsed} ms`);
         const display=answerDisplayRef.current;const snapshot=race.snapshot;
         if(display && snapshot){
@@ -1314,6 +1334,7 @@ function Main() {
       setUncertainTerms([]);setKeyTerms([]);setDetail("");setDetailLoading(false);setShowDetail(false);
       setDecisionMs(null);setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
       publishHint("");lastDecisionTextRef.current="";decisionVersionRef.current++;
+      liveHistory.begin("live","实时问答");
       sessionEpochRef.current++;runningRef.current=true;setRunning(true);setStatus("listening");
       logDiagnostic("开始聆听",`${settings.sttEngine}/${settings.sttModel} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
     } catch (cause) {
@@ -1330,6 +1351,7 @@ function Main() {
     lockedRef.current=false;setLocked(false);pendingHintRef.current="";
     detailRequestRef.current="";setDetailLoading(false);
     logDiagnostic("结束聆听");
+    liveHistory.end();
     try {await invoke("stop_capture");} catch (cause) {setError(`停止采集失败：${String(cause)}`);}
   };
   const toggleOverlay = async () => {
@@ -1456,6 +1478,7 @@ function Main() {
           <button className="ghost-btn panel-toggle" aria-pressed={practiceFeedbackVisible}
             onClick={()=>setPracticeFeedbackVisible(value=>!value)}><Sparkles size={17}/> 回答复盘</button>
         </>}
+        <button className="ghost-btn" onClick={()=>{setSettingsTab("history");setShowSettings(true);}}><FileText size={17}/> 历史</button>
         <button className="ghost-btn" onClick={() => setShowSettings(!showSettings)}><Settings2 size={17}/> 设置</button>
         <button className={settings.launcherOnTop ? "ghost-btn top-active" : "ghost-btn"}
           aria-pressed={settings.launcherOnTop} onClick={() => update({launcherOnTop:!settings.launcherOnTop})}>
@@ -1473,10 +1496,11 @@ function Main() {
           <button className="window-action close" aria-label="关闭程序" title="关闭程序" onClick={()=>void quitRef.current()}><X size={17}/></button>
         </div>
     </header>
+    {(historyError || practiceHistoryError || historyNativeError) && <p className="error-box history-save-error" role="alert">{historyError || practiceHistoryError || historyNativeError}</p>}
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
       onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy}
-      onPreviewChange={setPracticePreview}
+      onPreviewChange={setPracticePreview} history={practiceHistoryRecorder}
       onModelSettings={()=>{setSettingsTab("models");setShowSettings(true);}}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
@@ -1539,9 +1563,9 @@ function Main() {
       </section>
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
-      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
+      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志",history:"历史会话"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
       <nav className="settings-tabs" role="tablist" aria-label="设置分类">
-        {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["profile","个人资料",FileText], ["models","模型与服务",Sparkles], ["updates","软件更新",RefreshCw], ["diagnostics","诊断日志",Activity] ] as const).map(([tab,label,Icon])=><button
+        {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["profile","个人资料",FileText], ["models","模型与服务",Sparkles], ["updates","软件更新",RefreshCw], ["diagnostics","诊断日志",Activity], ["history","历史会话",FileText] ] as const).map(([tab,label,Icon])=><button
           key={tab} role="tab" aria-selected={settingsTab===tab} className={settingsTab===tab?"settings-tab selected":"settings-tab"}
           onClick={()=>{setSettingsTab(tab);setRecordingQuitShortcut(false);setQuitShortcutDraft("");}}><Icon size={15}/><span>{label}</span></button>)}
       </nav>
@@ -1689,6 +1713,8 @@ function Main() {
               onChange={e=>update({parallelLocal:{...settings.parallelLocal,baseUrl:e.target.value}})}/></label>
           </>}
         </div>
+        <div className="setting-group"><label className="check-row"><input type="checkbox" checked={settings.decisionFinalOnly} disabled={running || practiceWorking} onChange={e=>update({decisionFinalOnly:e.target.checked})}/>语义判别仅使用稳定转录片段（省 API 用量）</label>
+          <p className="setting-help">勾选后仍显示增量转录，但等片段稳定才调用判别模型；可减少重复请求，首条提示可能稍晚。默认保留增量判别。手动输入问题会跳过判别。</p></div>
         {(settings.decision.api === "ollama" || settings.answer.api === "ollama" || settings.parallelAnswer) && <div className="setting-group ollama-setup">
           <div className="setting-heading"><Sparkles size={18}/> 本地 Ollama
             <button className="text-link" onClick={()=>void refreshOllamaRuntime()} disabled={ollamaChecking}>{ollamaChecking?"检测中…":"重新检测"}</button></div>
@@ -1742,6 +1768,7 @@ function Main() {
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
         </div>}
         {settingsTab === "updates" && <SoftwareUpdate version={version} blocked={updateBlocked} updater={updater}/>}
+        {settingsTab === "history" && <HistoryView activeIds={[liveHistory.sessionId,practiceHistoryRecorder.sessionId]}/>}
         {settingsTab === "diagnostics" &&
         <div className="setting-group"><div className="setting-heading"><Activity size={18}/> 诊断日志</div>
           <p className="setting-help">仅保存在本机，最多保留最近 80 条状态与耗时；不记录音频、转录内容或 API 密钥。</p>
