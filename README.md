@@ -1,6 +1,6 @@
 # 模拟面试练习 · MockInterview
 
-当前版本：1.0.15。
+当前已发布版本：1.0.15。源码版本为 1.0.16，尚待完成桌面构建验证与发布。
 
 [下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.15/MockInterview_1.0.15_x64-setup.exe) · [查看 1.0.15 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.15)
 

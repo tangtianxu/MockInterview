@@ -33,7 +33,7 @@ pub struct PartyAudioConfig {
     pub role: PartyRole,
     pub device_id: String,
     pub is_input_device: bool,
-    /// "web_speech" | "whisper_cpp" | "deepgram" | "whisper_api" | "azure_speech" | "groq_whisper"
+    /// "disabled" | "web_speech" | "whisper_cpp" | "deepgram" | "whisper_api" | "azure_speech" | "groq_whisper"
     pub stt_provider: String,
     /// Model ID for local STT engines (e.g., "base", "small", "medium").
     /// Only used when stt_provider is a local engine like "whisper_cpp".
@@ -49,6 +49,48 @@ pub struct AudioSessionInfo {
     pub display_name: String,
     pub device_name: String,
     pub is_active: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum SystemCaptureRoute {
+    SharedInput,
+    SeparateInput,
+    Loopback,
+}
+
+#[cfg(test)]
+mod capture_route_tests {
+    use super::{system_capture_route, SystemCaptureRoute};
+
+    #[test]
+    fn offline_default_and_named_microphones_use_one_input_stream() {
+        for (mic, system) in [("default", "default"), ("", "default"), ("default", ""), ("mic-a", "mic-a")] {
+            assert_eq!(system_capture_route(mic, system, true), SystemCaptureRoute::SharedInput);
+        }
+    }
+
+    #[test]
+    fn an_input_device_never_falls_back_to_output_loopback() {
+        for (mic, system) in [("mic-a", "default"), ("default", "mic-b"), ("mic-a", "mic-b")] {
+            assert_eq!(system_capture_route(mic, system, true), SystemCaptureRoute::SeparateInput);
+        }
+        assert_eq!(system_capture_route("default", "default", false), SystemCaptureRoute::Loopback);
+        assert_eq!(system_capture_route("mic-a", "speakers", false), SystemCaptureRoute::Loopback);
+    }
+}
+
+fn system_capture_route(mic: &str, system: &str, system_is_input: bool) -> SystemCaptureRoute {
+    if !system_is_input {
+        return SystemCaptureRoute::Loopback;
+    }
+    // Empty and "default" both select the OS default input device.
+    let mic = if mic.is_empty() { "default" } else { mic };
+    let system = if system.is_empty() { "default" } else { system };
+    if mic == system {
+        SystemCaptureRoute::SharedInput
+    } else {
+        SystemCaptureRoute::SeparateInput
+    }
 }
 
 /// Coordinates mic + system capture threads and manages audio lifecycle.
@@ -141,10 +183,8 @@ impl AudioCaptureManager {
         // Same-device optimization: when both parties use the same input device,
         // open ONE capture and duplicate chunks with both Mic + System tags.
         // This avoids two cpal streams contending for the same 256-slot channel.
-        let same_device = system_is_input
-            && !system_device_id.is_empty()
-            && system_device_id != "default"
-            && mic_device_id == system_device_id;
+        let route = system_capture_route(mic_device_id, system_device_id, system_is_input);
+        let same_device = route == SystemCaptureRoute::SharedInput;
 
         if same_device {
             log::info!(
@@ -181,7 +221,7 @@ impl AudioCaptureManager {
         // Start system audio capture (only if not already handled by same-device path)
         if same_device {
             // Already handled above — both Mic and System chunks from single stream
-        } else if system_is_input && !system_device_id.is_empty() && system_device_id != "default" {
+        } else if route == SystemCaptureRoute::SeparateInput {
             // "Them" is a different input device — capture tagged as System
             let system_tx = tx.clone();
             match mic_capture::start_mic_capture(system_device_id, system_tx, AudioSource::System) {

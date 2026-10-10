@@ -251,3 +251,4 @@ html,body,#root{background:transparent!important}
 .update-notes{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.7;margin:12px 0;color:inherit}
 .update-progress{display:grid;gap:8px;font-size:13px;margin:15px 0}
 .update-progress progress{width:100%;height:9px;accent-color:#50cbb9}
+.mode-card.offline{grid-column:1/-1;height:auto;min-height:98px}

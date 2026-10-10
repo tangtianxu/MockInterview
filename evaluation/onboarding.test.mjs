@@ -78,6 +78,15 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await page.evaluate(()=>window.allowSending=false);await removeOllama.click();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='delete_ollama_model').length),0);
  await page.evaluate(()=>window.allowSending=true);await removeOllama.click();await page.getByText(/已删除模型 qwen3:4b-instruct/).waitFor();assert.equal(await removeOllama.isDisabled(),true);
  const removed=await page.evaluate(()=>window.calls.find(c=>c.command==='delete_ollama_model').args);assert.equal(removed.model,'qwen3:4b-instruct');assert.equal(removed.baseUrl,'http://127.0.0.1:11434');
+ await page.goto(url);await guide.waitFor();
+ await guide.getByRole('button',{name:'线下面试：麦克风测试',exact:true}).click();
+ await page.getByRole('combobox',{name:'采集模式'}).waitFor();
+ assert.equal(await page.getByRole('combobox',{name:'采集模式'}).inputValue(),'offline');
+ assert.equal(await page.getByRole('combobox',{name:'提问麦克风'}).inputValue(),'default');
+ assert.equal(await page.getByRole('combobox',{name:'面试音频输出设备'}).isDisabled(),true);
+ assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_capture_per_party').length),0,'guide does not start recording automatically');
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();
+ await page.getByRole('button',{name:'开始聆听',exact:true}).waitFor();
  await browser.close();browser=null;
  }finally{if(browser)await browser.close();server.kill();await unlink(fixture).catch(()=>{});}
 });

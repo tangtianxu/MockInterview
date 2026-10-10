@@ -10,7 +10,7 @@ export type GuideSetup={
   speechModel:string;speechReady:boolean;speechDirectory:string;speechDownload:string;speechError:string;speechNotice:string;
   speechUrl:string;speechFilename:string;speechEngine:string;
   onSpeechModel:(value:string)=>void;onSpeechDownload:()=>void;onSpeechPath:()=>void;onSpeechDetect:()=>void;
-  onProfile:()=>void;onAudio:()=>void;resumeName?:string;resumeAnalyzed?:boolean;analyzing?:boolean;onResume?:()=>void;onAnalyze?:()=>void;
+  onProfile:()=>void;onAudio:()=>void;onOfflineTest?:()=>void;resumeName?:string;resumeAnalyzed?:boolean;analyzing?:boolean;onResume?:()=>void;onAnalyze?:()=>void;
 };
 type Completion={branch:boolean;skipSpeech:boolean;profile:boolean;tested:boolean};
 function savedCompletion():Completion {try{return {branch:false,skipSpeech:false,profile:false,tested:false,...JSON.parse(localStorage.getItem("mockInterview.guideCompletion")||"{}")};}catch{return {branch:false,skipSpeech:false,profile:false,tested:false};}}
@@ -77,9 +77,11 @@ export function SetupGuide({setup,onSettings,onDismiss}:{setup:GuideSetup;onSett
         {setup.resumeName&&<p>{setup.resumeName}{setup.resumeAnalyzed?" · 已保存分析":" · 尚未分析"}</p>}
         <button className="practice-secondary" onClick={()=>complete({profile:!done.profile})}>{done.profile?"重新检查资料":"资料已填写 / 暂时跳过"}</button>
       </li>
-      <li>{heading("用 B 站素材测试效果",done.tested)}
+      <li>{heading("用视频或麦克风测试效果",done.tested)}
         <p>双击左上角图标可切换页面。搜索“模拟面试＋你的岗位”，播放短片段测试转录、问题理解和生成效果；在模拟练习页，也可暂停视频后自己回答，再提交并查看复盘与参考答案。重点核对术语、缩写和关键原理。耳机播放的音频从所选系统输出设备采集，麦克风作答则转写你说的话。</p>
+        <p>也可选择“线下面试”，用麦克风自定义提问：选择提问麦克风，完成设置后点击“开始聆听”，依次核对实时转录、模型理解的问题和回答。可先介绍背景，再说“这种情况怎么解决”等追问。此模式只采集麦克风，不区分说话人；语音模型和生成模型复用现有设置。</p>
         <div className="setup-guide-actions"><button className="practice-secondary" onClick={()=>void visit("https://search.bilibili.com/all?keyword=%E6%A8%A1%E6%8B%9F%E9%9D%A2%E8%AF%95")}>查找 B 站模拟面试视频</button>
+          {setup.onOfflineTest&&<button className="practice-secondary" disabled={setup.blocked} onClick={setup.onOfflineTest}>线下面试：麦克风测试</button>}
           <button className="practice-secondary" onClick={setup.onAudio}>选择音频设备</button><button className="practice-secondary" onClick={()=>complete({tested:!done.tested})}>{done.tested?"重新测试":"已完成效果测试"}</button></div>
       </li>
     </ol>

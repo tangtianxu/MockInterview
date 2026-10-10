@@ -1100,7 +1100,8 @@ pub async fn start_capture_per_party(
                 let _=provider.stop_stream().await;
                 if let Some(provider)=you_stt_provider.as_mut(){let _=provider.stop_stream().await;}
                 let _=stop_capture(app.clone()).await;
-                return Err(format!("系统音频转录初始化失败：{e}"));
+                let source = if them.is_input_device { "提问麦克风" } else { "系统音频" };
+                return Err(format!("{source}转录初始化失败：{e}"));
             }
         }
     }
@@ -1643,7 +1644,7 @@ pub async fn start_capture_per_party(
 }
 
 /// Create an STT provider for a party based on their config.
-/// Returns None if the party uses web_speech (frontend-only).
+/// Returns None if the party is disabled or uses web_speech (frontend-only).
 ///
 /// API keys are read directly from the credential store (not the STTRouter)
 /// because per-party mode never calls set_stt_provider(), so the router's
@@ -1655,6 +1656,12 @@ async fn create_stt_provider_for_party(
     party_role: &str,
 ) -> Result<Option<Box<dyn STTProvider>>, String> {
     use crate::stt::provider::STTProviderType;
+
+    // One shared microphone can provide questions without also transcribing
+    // candidate replies. Do not create a second provider or change the OS default.
+    if config.stt_provider == "disabled" {
+        return Ok(None);
+    }
 
     let stt_type = STTProviderType::from_str(&config.stt_provider)
         .ok_or_else(|| format!("Unknown STT provider: {}", config.stt_provider))?;

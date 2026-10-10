@@ -1,6 +1,6 @@
 [package]
 name = "interview-cue"
-version = "1.0.15"
+version = "1.0.16"
 description = "Local Chinese interview answer cues"
 authors = ["InterviewCue contributors", "NexQ contributors"]
 edition = "2021"

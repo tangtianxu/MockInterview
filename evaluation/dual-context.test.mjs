@@ -4,17 +4,17 @@ import {spawn} from 'node:child_process';
 import {mkdir,writeFile,unlink} from 'node:fs/promises';
 import {chromium} from 'playwright-core';
 
-test('dual transcription supplies candidate context without triggering questions; stored introduction is isolated',{timeout:60000},async()=>{
+test('dual and microphone-only transcription route questions and preserve context; stored introduction is isolated',{timeout:90000},async()=>{
  const fixture='outputs/dual-context-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  const params=new URLSearchParams(location.search);mockWindows('launcher');localStorage.clear();
- localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('video')?'video':'live',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
+ localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('offline')?'offline':params.get('video')?'video':'live',mic:params.get('namedMic')?'fixture-mic':'default',output:'fixture-speakers',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
  window.calls=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='load_interview_profile')return null;
  if(command==='plugin:app|version')return 'test';
- if(command==='list_audio_devices')return JSON.stringify({inputs:[],outputs:[]});
+ if(command==='list_audio_devices')return JSON.stringify({inputs:[{id:'fixture-mic',name:'测试麦克风'}],outputs:[{id:'fixture-speakers',name:'测试扬声器'}]});
  if(command==='list_local_stt_engines')return JSON.stringify([{engine:'whisper_cpp',name:'Whisper',models:[{definition:{model_id:'small',display_name:'Small',is_streaming:true},is_downloaded:true}]}]);
  if(command==='mvp_list_models')return ['test'];
  if(command==='local_stt_model_directory')return 'fixture';
@@ -105,6 +105,41 @@ test('dual transcription supplies candidate context without triggering questions
   await speech('User','only-user','候选人提出的问题',1);await page.waitForTimeout(550);
   assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),0);
   await page.getByRole('button',{name:'结束练习',exact:true}).click();
+ }
+ // Offline questions use one selected mic and one STT provider, including the OS default mic.
+ for(const query of ['?offline=1','?offline=1&namedMic=1','?offline=1&api=1']){
+  await load(query);
+  const configs=await page.evaluate(()=>{
+   const args=window.calls.find(x=>x.command==='start_capture_per_party').args;
+   return {you:JSON.parse(args.youConfig),them:JSON.parse(args.themConfig)};
+  });
+  const device=query.includes('namedMic')?'fixture-mic':'default';
+  assert.equal(configs.you.device_id,device);assert.equal(configs.them.device_id,device);
+  assert.equal(configs.you.stt_provider,'disabled');assert.equal(configs.you.local_model_id,null);
+  assert.equal(configs.them.is_input_device,true);
+  assert.equal(configs.them.stt_provider,query.includes('api')?'groq_whisper':'whisper_cpp');
+  assert.equal(configs.them.local_model_id,query.includes('api')?null:'small');
+  await page.evaluate(()=>window.send('audio_level',{source:'Mic',level:0.7}));
+  await speech('Them','offline-question','PPO 的原理是什么',100);
+  await page.locator('.answer-text').filter({hasText:'PPO 的原理是什么'}).waitFor();
+  assert.match(await page.locator('.transcript-scroll').textContent(),/麦克风提问/);
+  assert.doesNotMatch(await page.locator('.meter-foot').textContent(),/锁定/);
+  await speech('Them','offline-followup','什么时候使用',200);
+  await page.locator('.answer-text').filter({hasText:'什么时候使用'}).waitFor();
+  const follow=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
+  assert.match(follow.context,/PPO 的原理/);assert.equal(follow.videoMode,false);
+  assert.equal(await page.getByRole('button',{name:/线下面试/}).isDisabled(),true);
+  await page.getByRole('button',{name:'结束练习',exact:true}).click();
+  await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'音频设备'}).click();
+  assert.equal(await page.getByRole('combobox',{name:'采集模式'}).inputValue(),'offline');
+  assert.equal(await page.getByRole('combobox',{name:'面试音频输出设备'}).isDisabled(),true);
+  assert.equal(await page.getByRole('combobox',{name:'提问麦克风'}).inputValue(),device);
+  await page.getByRole('combobox',{name:'采集模式'}).selectOption('video');
+  assert.equal(await page.getByRole('combobox',{name:'面试音频输出设备'}).inputValue(),'fixture-speakers');
+  assert.equal(await page.getByRole('combobox',{name:'面试音频输出设备'}).isDisabled(),false);
+  await page.getByRole('combobox',{name:'采集模式'}).selectOption('offline');
+  await page.waitForFunction(()=>window.calls.some(c=>c.command==='save_interview_profile'&&c.args.profile.settings.mode==='offline'));
+  await page.getByRole('button',{name:'完成设置',exact:true}).click();
  }
  await load('?emptyIntro=1');await speech('Them','intro-empty','请介绍一下你自己',1);
  await page.locator('.answer-text').filter({hasText:'尚未保存自我介绍'}).waitFor();

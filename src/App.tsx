@@ -22,11 +22,11 @@ import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, providerDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
+import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 
 type Api = ModelApi;
 type SttMode = "local" | "api";
 type SttApiProvider = "groq_whisper" | "deepgram";
-type Mode = "live" | "video";
 type Status = "idle" | "listening" | "deciding" | "generating" | "error";
 type DisplaySource = AnswerSource | "saved";
 type ModelEndpoint = ModelConfig & { credentialSlot: string };
@@ -97,6 +97,7 @@ function loadSettings(input?: unknown): Settings {
       modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
     const sharedModelConnection=sharedConnectionDefault(old);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
+      mode:old.mode === "video" || old.mode === "offline" ? old.mode : "live",
       micTranscription:old.micTranscription!==false,
       decisionFinalOnly:old.decisionFinalOnly===true,
       selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
@@ -1203,7 +1204,7 @@ function Main() {
       }));
       stops.push(await listen<{party?:string;status:string;error?:string;message?:string}>("stt_connection_status",event=>{
         if(!active || (!runningRef.current && !captureStartingRef.current) || event.payload.status!=="error")return;
-        const party=event.payload.party==="You" ? "麦克风" : "面试音频";
+        const party=event.payload.party==="You" ? "麦克风" : settingsRef.current.mode==="offline" ? "提问麦克风" : "面试音频";
         setError(`${party}转录连接失败：${event.payload.error || event.payload.message || "请检查所选识别服务"}`);
         logDiagnostic("转录连接失败",party);
       }));
@@ -1339,13 +1340,8 @@ function Main() {
           language:"zh",temperature:0,response_format:"json",timestamp_granularities:[],
           prompt:remoteTopic,segment_duration_secs:3})});
       }
-      const transcribeMic=settings.mode==="live" && settings.micTranscription;
-      const you={role:"You",device_id:settings.mic,is_input_device:true,
-        stt_provider:transcribeMic ? settings.sttMode==="local" ? settings.sttEngine : settings.sttApiProvider : "web_speech",
-        local_model_id:transcribeMic && settings.sttMode==="local" ? settings.sttModel : null};
-      const them = {role:"Them",device_id:settings.output,is_input_device:false,
-        stt_provider:settings.sttMode === "local" ? settings.sttEngine : settings.sttApiProvider,
-        local_model_id:settings.sttMode === "local" ? settings.sttModel : null};
+      const offline=settings.mode==="offline";
+      const {you,them}=capturePartyConfigs(settings);
       await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});
       segmentsRef.current=[];setSegments([]);setPartial(null);partialRef.current=null;
       micPartialRef.current=null;setMicPartial(null);savedIntroductionRef.current=false;
@@ -1357,9 +1353,9 @@ function Main() {
       setUncertainTerms([]);setKeyTerms([]);setDetail("");setDetailLoading(false);setShowDetail(false);
       setDecisionMs(null);setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
       publishHint("");lastDecisionTextRef.current="";decisionVersionRef.current++;
-      liveHistory.begin("live","实时问答");
+      liveHistory.begin("live",offline ? "线下面试 · 麦克风测试" : settings.mode==="video" ? "视频测试" : "实时问答");
       sessionEpochRef.current++;runningRef.current=true;setRunning(true);setStatus("listening");
-      logDiagnostic("开始聆听",`${settings.sttEngine}/${settings.sttModel} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
+      logDiagnostic("开始聆听",`${settings.mode} · ${settings.sttMode==="local" ? `${settings.sttEngine}/${settings.sttModel}` : `${settings.sttApiProvider}/${settings.sttApiModel}`} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
     } catch (cause) {
       await invoke("stop_capture").catch(()=>{});
       setStatus("error");setError(`无法开始采集：${String(cause)}`);
@@ -1553,7 +1549,7 @@ function Main() {
         <button className="ghost-btn" onClick={() => void toggleOverlay()}><MonitorPlay size={17}/> {overlayVisible?"隐藏悬浮窗":"显示悬浮窗"}</button>
         {workspaceMode==="assist" && <>
         <button className={running?"stop-btn":"start-btn"} onClick={() => void (running?stop():start())} disabled={startingService || updater.busy || deletingModel || managingOllama}>
-          {running?<><Square size={14} fill="currentColor"/> 结束练习</>:startingService?"连接本地模型…":<><Play size={15} fill="currentColor"/> 开始聆听</>}
+          {running?<><Square size={14} fill="currentColor"/> 结束练习</>:startingService?"准备音频与模型…":<><Play size={15} fill="currentColor"/> 开始聆听</>}
         </button>
         </>}
       </div>
@@ -1580,7 +1576,12 @@ function Main() {
         speechModel:settings.sttModel,speechReady:!!chosenModel?.is_downloaded,speechDirectory:sttModelsDirectory,speechDownload:download,speechError:downloadError,speechNotice:downloadNotice,speechUrl:chosenModel?.downloadUrl || "",speechFilename:chosenModel?.filename || "",speechEngine:settings.sttEngine,
         onSpeechModel:value=>{update({sttMode:"local",sttEngine:"sherpa_bilingual",sttModel:value});setDownloadError("");setDownloadNotice("");},
         onSpeechDownload:()=>void downloadModel(),onSpeechPath:()=>void chooseSttModelsDirectory(),onSpeechDetect:()=>void refreshEngines(),
-        onProfile:()=>{setSettingsTab("profile");setShowSettings(true);},onAudio:()=>{setSettingsTab("audio");setShowSettings(true);}}}
+        onProfile:()=>{setSettingsTab("profile");setShowSettings(true);},onAudio:()=>{setSettingsTab("audio");setShowSettings(true);},
+        onOfflineTest:()=>{
+          if(running || startingService || practiceWorking || practiceActive || updater.busy || deletingModel || managingOllama)return;
+          update({mode:"offline",compactView:false,transcriptVisible:true,answerVisible:true});
+          setWorkspaceMode("assist");setSettingsTab("audio");setShowSettings(true);
+        }}}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
       onResumeImported={importResume} onAnalysis={storeResumeAnalysis} onClearResume={clearResume}
@@ -1594,21 +1595,22 @@ function Main() {
         <div className="hero-card"><div className="hero-icon"><AudioLines size={25}/></div><h1>专注听题，<br/>从容作答。</h1><p>听到面试官的问题后，自动提炼关键意图，生成可扫读的中文提示。</p>
           <div className="hero-footer"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "所选 API 会接收对应环节的数据" : "当前为本地模型模式"}</div></div>
         <div className="section-title"><span>当前模式</span><CircleHelp size={15}/></div>
-        <div className="mode-grid"><button className={settings.mode==="live"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"live"})} disabled={running}><Headphones size={19}/><strong>远程面试</strong><small>{settings.micTranscription ? "面试音频＋我的回答" : "只听系统声音"}</small></button>
-          <button className={settings.mode==="video"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"video"})} disabled={running}><MonitorPlay size={19}/><strong>视频测试</strong><small>双方同一音轨</small></button></div>
+        <div className="mode-grid"><button className={settings.mode==="live"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"live"})} disabled={running || startingService}><Headphones size={19}/><strong>远程面试</strong><small>{settings.micTranscription ? "面试音频＋我的回答" : "只听系统声音"}</small></button>
+          <button className={settings.mode==="video"?"mode-card selected":"mode-card"} onClick={()=>update({mode:"video"})} disabled={running || startingService}><MonitorPlay size={19}/><strong>视频测试</strong><small>双方同一音轨</small></button>
+          <button className={`mode-card offline${settings.mode==="offline"?" selected":""}`} onClick={()=>update({mode:"offline"})} disabled={running || startingService}><Mic2 size={19}/><strong>线下面试</strong><small>麦克风提问 · 自定义测试</small></button></div>
         <div className="status-card"><div className="status-top"><span>采集状态</span><span className={`status-chip ${status}`}>{statusText[status]}</span></div>
-          <div className="meter-label"><Volume2 size={15}/> 面试音频 <span>{Math.round(systemLevel*100)}%</span></div><div className="meter"><i style={{width:`${systemLevel*100}%`}}/></div>
-          <div className="meter-label"><Mic2 size={15}/> 我的麦克风 <span>{Math.round(micLevel*100)}%</span></div><div className="meter mic"><i style={{width:`${micLevel*100}%`}}/></div>
-          <div className="meter-foot">{locked?<><LockKeyhole size={13}/> 你正在说话，提示更新已锁定</>:settings.mode==="live" && settings.micTranscription ? "麦克风转录用于理解追问" : "麦克风仅用于控制提示更新"}</div></div>
-        <div className="rail-note"><span>使用提示</span><p>播放视频时，先确认「面试音频」音量条有变化。若始终为 0，请在设置中选择视频实际使用的输出设备。</p></div>
+          {settings.mode!=="offline" && <><div className="meter-label"><Volume2 size={15}/> 面试音频 <span>{Math.round(systemLevel*100)}%</span></div><div className="meter"><i style={{width:`${systemLevel*100}%`}}/></div></>}
+          <div className="meter-label"><Mic2 size={15}/> {settings.mode==="offline" ? "提问麦克风" : "我的麦克风"} <span>{Math.round(micLevel*100)}%</span></div><div className="meter mic"><i style={{width:`${micLevel*100}%`}}/></div>
+          <div className="meter-foot">{settings.mode==="offline" ? "麦克风用于提问；不采集系统声音" : locked?<><LockKeyhole size={13}/> 你正在说话，提示更新已锁定</>:settings.mode==="live" && settings.micTranscription ? "麦克风转录用于理解追问" : settings.mode==="video" ? "从视频音轨识别问题与追问" : "麦克风仅用于控制提示更新"}</div></div>
+        <div className="rail-note"><span>使用提示</span><p>{settings.mode==="offline" ? "在设置中选择提问麦克风，点击开始聆听后说出问题。先核对转录，再核对模型理解的问题；也可先说背景，再追加追问。此模式不区分麦克风中的说话人，请用它测试提问。" : "播放视频时，先确认「面试音频」音量条有变化。若始终为 0，请在设置中选择视频实际使用的输出设备。"}</p></div>
       </section>
       <section className="transcript-panel"><div className="panel-header"><div><span className="panel-kicker">实时识别</span><h2>实时转录</h2></div><span className="panel-count">{segments.length} 条记录</span></div>
         <div className="transcript-scroll" ref={transcriptScrollRef} onScroll={event=>{
           const node=event.currentTarget;
           followTranscriptRef.current=node.scrollHeight-node.clientHeight-node.scrollTop<56;
         }}>{segments.length===0 && !partial && !micPartial && <div className="empty-state"><div className="empty-icon"><ScanText size={30}/></div><h3>等待声音进入</h3><p>开始聆听后，这里会出现面试音频的增量转录。</p><span>中英文术语会保留原始识别结果</span></div>}
-          {segments.map((item,index)=><div className="utterance" key={item.id}><div className="utterance-meta"><span className="speaker-dot"/> {item.speaker==="User" ? "我的回答" : settings.mode==="video" ? "视频音频" : "面试官"} <span>#{String(index+1).padStart(2,"0")}</span></div><p>{item.text}</p></div>)}
-          {partial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> {settings.mode==="video" ? "视频音频" : "面试官"} · 正在识别 <Activity size={13}/></div><p>{partial.text}</p></div>}
+          {segments.map((item,index)=><div className="utterance" key={item.id}><div className="utterance-meta"><span className="speaker-dot"/> {item.speaker==="User" ? "我的回答" : settings.mode==="offline" ? "麦克风提问" : settings.mode==="video" ? "视频音频" : "面试官"} <span>#{String(index+1).padStart(2,"0")}</span></div><p>{item.text}</p></div>)}
+          {partial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> {settings.mode==="offline" ? "麦克风提问" : settings.mode==="video" ? "视频音频" : "面试官"} · 正在识别 <Activity size={13}/></div><p>{partial.text}</p></div>}
           {micPartial && <div className="utterance partial"><div className="utterance-meta"><span className="speaker-dot"/> 我的回答 · 正在识别 <Activity size={13}/></div><p>{micPartial.text}</p></div>}
           </div>
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
@@ -1677,18 +1679,20 @@ function Main() {
           <label>窗口透明度 · {settings.opacity}%<input type="range" min="70" max="100" step="5" value={settings.opacity}
             onChange={event=>update({opacity:Number(event.target.value)})}/></label>
           <p className="setting-help">透明度会同时作用于文字和背景；低于 80% 时，请留意文字是否仍清晰。控制区可从顶部收起，转录与回答会保留。</p>
-          <label>面试场景<select value={settings.mode} onChange={event=>update({mode:event.target.value as Mode})} disabled={running}>
-            <option value="live">远程面试 · 只听系统声音</option><option value="video">视频测试 · 双方同一音轨</option></select></label>
+          <label>面试场景<select value={settings.mode} onChange={event=>update({mode:event.target.value as Mode})} disabled={running || startingService}>
+            <option value="live">远程面试 · 系统声音提问</option><option value="video">视频测试 · 双方同一音轨</option><option value="offline">线下面试 · 麦克风提问</option></select></label>
           <p className="setting-help">主窗口顶部的“控制区、转录、提示”可分别显示或隐藏；至少保留一块内容。窗口缩小时其余内容可滚动查看。</p>
         </div>
         </>}
         {settingsTab === "audio" && <>
         <div className="setting-group"><div className="setting-heading"><Headphones size={18}/> 音频设备 <button className="text-link" onClick={()=>void refreshDevices()}>刷新</button></div>
-        <label>面试音频输出设备<select value={settings.output} onChange={e=>update({output:e.target.value})} disabled={running}><option value="default">系统默认输出</option>{devices.outputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label>我的麦克风<select value={settings.mic} onChange={e=>update({mic:e.target.value})} disabled={running}><option value="default">系统默认麦克风</option>{devices.inputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label className="connection-sharing"><input type="checkbox" checked={settings.micTranscription} disabled={running || practiceActive}
+        <label>采集模式<select value={settings.mode} onChange={e=>update({mode:e.target.value as Mode})} disabled={running || startingService || practiceActive || practiceWorking}>
+          <option value="live">远程面试 · 系统声音提问</option><option value="video">视频测试 · 双方同一音轨</option><option value="offline">线下面试 · 麦克风提问</option></select></label>
+        <label>面试音频输出设备<select value={settings.output} onChange={e=>update({output:e.target.value})} disabled={running || startingService || settings.mode==="offline"}><option value="default">系统默认输出</option>{devices.outputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>{settings.mode==="offline" ? "提问麦克风" : "我的麦克风"}<select value={settings.mic} onChange={e=>update({mic:e.target.value})} disabled={running || startingService || practiceActive || practiceWorking}><option value="default">系统默认麦克风</option>{devices.inputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label className="connection-sharing"><input type="checkbox" checked={settings.micTranscription} disabled={running || startingService || practiceActive || settings.mode!=="live"}
             onChange={e=>update({micTranscription:e.target.checked})}/><span>转录我的回答，用于理解追问（远程面试）</span></label>
-          <p className="setting-help">麦克风与系统音频使用所选识别服务，分别标记角色。你的回答仅提供上下文，面试官的发言触发判别。双路会增加本机资源或 API 用量；语音 API 会收到麦克风声音，判别 API 会收到相关对话文本。视频测试沿用视频单音轨。</p></div>
+          <p className="setting-help">{settings.mode==="offline" ? "线下面试只采集所选麦克风，沿用语音识别、问题理解和回答模型。所有麦克风发言均进入提问通道，不区分说话人；背景与追问使用已有对话上下文，说话时不会锁住提示。语音 API 会接收麦克风声音，判别 API 会接收相关转录文本。完成设置后点击开始聆听即可测试。" : "麦克风与系统音频使用所选识别服务，分别标记角色。你的回答仅提供上下文，面试官的发言触发判别。双路会增加本机资源或 API 用量；语音 API 会收到麦克风声音，判别 API 会收到相关对话文本。视频测试沿用视频单音轨。"}</p></div>
         </>}
         {settingsTab === "profile" && <>
         <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 面试背景</div>
