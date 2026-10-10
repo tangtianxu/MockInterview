@@ -1155,17 +1155,25 @@ function Main() {
       if (decision.intent==="self_introduction" && (decision.action==="show" || decision.action==="revise")) {
         if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==pending.sourceId)showSelfIntroduction(pending.sourceId,pending.receivedAt);
       } else if (decision.action === "show" || decision.action === "revise") {
+        // Metadata changes alone do not justify regenerating the same question.
+        if (decision.question.trim() === questionRef.current.trim()) {
+          logDiagnostic("保留当前问题","提取的问题未变化，忽略显示动作及要点变化");
+          if (!answerRequestRef.current) setStatus("listening");
+          return;
+        }
         const transition = questionTransition({hasActiveQuestion:Boolean(questionRef.current),
           activeSourceId:activeSourceRef.current,sourceId:pending.sourceId,isFinal:pending.isFinal,
           alreadyRevisedSource:revisedSourceRef.current===pending.sourceId,
           action:decision.action,relation:decision.relation});
         if (!transition) {
+          logDiagnostic("保留当前问题",`同源 ${activeSourceRef.current===pending.sourceId} · 稳定 ${pending.isFinal} · 已修正 ${revisedSourceRef.current===pending.sourceId} · ${decision.action}/${decision.relation}`);
           if (!answerRequestRef.current) setStatus("listening");
           return;
         }
         const keyTerms = [...new Set((decision.key_terms || []).map(term => term.trim()).filter(Boolean))].slice(0,3);
         const task = JSON.stringify([decision.question,decision.focus || [],keyTerms,decision.constraints || [],decision.uncertain_terms || []]);
         if (task !== answerTaskRef.current) {
+          logDiagnostic("更新回答任务",`${transition} · ${decision.action}/${decision.relation}`);
           manualOverrideSourceRef.current="";
           if (transition === "revision") revisedSourceRef.current=pending.sourceId;
           activeSourceRef.current = pending.sourceId;

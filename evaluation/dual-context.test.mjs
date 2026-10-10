@@ -4,13 +4,13 @@ import {spawn} from 'node:child_process';
 import {mkdir,writeFile,unlink} from 'node:fs/promises';
 import {chromium} from 'playwright-core';
 
-test('dual and microphone-only transcription route questions and preserve context; stored introduction is isolated',{timeout:90000},async()=>{
+test('dual and microphone-only transcription route questions and preserve context; stored introduction is isolated',{timeout:120000},async()=>{
  const fixture='outputs/dual-context-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  const params=new URLSearchParams(location.search);mockWindows('launcher');localStorage.clear();
  localStorage.setItem('interviewCue.settings',JSON.stringify({sttEngine:'whisper_cpp',sttModel:'small',mode:params.get('offline')?'offline':params.get('video')?'video':'live',mic:params.get('namedMic')?'fixture-mic':'default',output:'fixture-speakers',micTranscription:!params.get('disabled'),sttMode:params.get('api')?'api':'local',sharedModelConnection:true,decisionIntervalSeconds:params.has('throttle')?undefined:2,answer:{api:'openai',baseUrl:'https://example.com/v1',model:'test'},selfIntroduction:params.get('emptyIntro')?'':'INTRO_PRIVATE_我是研究生，研究机器人。'}));
- window.calls=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
+ window.calls=[];window.decisions=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
  mockIPC(async(command,args)=>{window.calls.push({command,args,at:performance.now()});
  if(command==='load_interview_profile')return null;
  if(command==='plugin:app|version')return 'test';
@@ -23,6 +23,7 @@ test('dual and microphone-only transcription route questions and preserve contex
  if(command==='has_api_key')return true;
  if(command.includes('is_registered'))return false;
  if(command==='mvp_decide'){
+  if(window.decisions.length)return window.decisions.shift();
   const text=args.input.currentText;
   const intro=text==='请介绍一下你自己';
   const question=text==='为什么选择它'&&args.input.context.includes('GAE')?'为什么选择 GAE':text;
@@ -66,6 +67,35 @@ test('dual and microphone-only transcription route questions and preserve contex
  const interval=page.getByRole('combobox',{name:'语义判别最小间隔'});assert.equal(await interval.inputValue(),'5');
  await interval.selectOption('10');await page.waitForFunction(()=>window.calls.some(x=>x.command==='save_interview_profile'&&x.args.profile.settings.decisionIntervalSeconds===10));
  await page.getByRole('button',{name:'完成设置',exact:true}).click();
+ // A batched video follow-up must replace the previous definition, including when
+ // the last fragment is a partial candidate answer rather than the question.
+ const decision=(question,relation='new',action='show',intent='question')=>({intent,relation,action,question,focus:[],key_terms:[],constraints:[],uncertain_terms:[]});
+ await load('?video=1&throttle=1');
+ await page.evaluate(d=>window.decisions.push(d),decision('解释一下模型的泛化能力是什么'));
+ await speech('Them','definition','解释一下模型的泛化能力是什么',100);
+ await page.locator('.answer-text').filter({hasText:'解释一下模型的泛化能力是什么'}).waitFor();
+ await page.evaluate(d=>window.decisions.push(d),decision('如何提升模型的泛化能力','follow_up'));
+ await speech('Them','question','那一般怎么样去提升模型的方法能力呢',200);
+ await speech('Them','reply-1','嗯首先是呢需要对区域训练它这个过程当中他的数据',300);
+ await speech('Them','reply-2','集的构成首先要做到尽量的',400,false);
+ await page.locator('.answer-text').filter({hasText:'如何提升模型的泛化能力'}).waitFor();
+ const mixed=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
+ assert.equal(mixed.currentText,'那一般怎么样去提升模型的方法能力呢\n嗯首先是呢需要对区域训练它这个过程当中他的数据\n集的构成首先要做到尽量的');
+ assert.match(mixed.context,/解释一下模型的泛化能力/);assert.equal(mixed.isFinal,false);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),2);
+ await page.evaluate(d=>window.decisions.push(d),decision('','none','wait','statement'));
+ await speech('Them','reply-2','集的构成首先要做到尽量的覆盖测试分布',400);
+ await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===3);
+ await page.waitForTimeout(250);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),2,'candidate answers cannot recreate a previous question');
+ assert.match(await page.locator('.answer-text').textContent(),/如何提升模型的泛化能力/);
+ // A weak classifier may mistakenly emit show again with changed metadata.
+ await page.evaluate(d=>window.decisions.push({...d,focus:['训练数据覆盖'],key_terms:['正则化']}),decision('如何提升模型的泛化能力'));
+ await speech('Them','reply-3','还可以做正则化',500);
+ await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===4);
+ await page.waitForTimeout(250);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),2,'unchanged questions must not regenerate when classifier metadata changes');
+ await page.getByRole('button',{name:'结束练习',exact:true}).click();
  // Only the question channel controls pausing: online/video = system; offline = mic.
  for(const query of ['', '?video=1', '?offline=1']){
   const source=query.includes('offline')?'Mic':'System';const other=source==='Mic'?'System':'Mic';
