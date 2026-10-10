@@ -23,6 +23,8 @@ import { connectionModel, modelServices, serviceId, serviceDefaults, providerDef
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
 import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
+import {usePanelLayout} from "./usePanelLayout";
+import {TestGuide} from "./TestGuide";
 
 type Api = ModelApi;
 type SttMode = "local" | "api";
@@ -48,7 +50,7 @@ type Settings = {
 };
 type SavedProfile = {settings:Settings;resumeAnalysis:{hash:string;analysis:Analysis}|null;
   practiceConfig?:PracticeConfig|null};
-type PrivacyDisplayState = {launcher_capture_excluded:boolean;overlay_capture_excluded:boolean;taskbar_hidden:boolean;errors:string[]};
+type PrivacyDisplayState = {launcher_capture_excluded:boolean;overlay_capture_excluded:boolean;taskbar_hidden:boolean;errors:string[];capture_mode?:"exclude"|"blackout"|"unsupported";windows_build?:number|null};
 type Device = { id: string; name: string; is_default: boolean };
 type ModelInfo = { id: string; name: string; is_downloaded: boolean; is_streaming: boolean; engine: string; downloadUrl?:string; filename?:string };
 type EngineInfo = { engine: string; name: string; models: ModelInfo[] };
@@ -210,12 +212,12 @@ function dragWindow(event: MouseEvent<HTMLElement>) {
 }
 
 function ResizeCorners() {
-  const corners=(["NorthWest","NorthEast","SouthWest","SouthEast"] as const);
+  const corners=(["NorthWest","NorthEast","SouthWest","SouthEast","North","South","East","West"] as const);
   return <>{corners.map(direction=><div key={direction} className={`resize-corner resize-${direction.toLowerCase()}`}
-    role="presentation" onMouseDown={event=>{
+    role="presentation" onPointerDown={event=>{
       if(event.button!==0)return;
       event.preventDefault();event.stopPropagation();
-      void getCurrentWebviewWindow().startResizeDragging(direction);
+      void getCurrentWebviewWindow().startResizeDragging(direction).catch(cause=>console.error("窗口缩放失败",cause));
     }}/>)}</>;
 }
 
@@ -296,6 +298,9 @@ function Main() {
   const restoreShortcutRef = useRef("");
   const quitShortcutInputRef = useRef<HTMLInputElement>(null);
   const [devices, setDevices] = useState<{inputs: Device[]; outputs: Device[]}>({inputs:[], outputs:[]});
+  const [audioCheck,setAudioCheck]=useState({ready:false,checking:false,error:"",fingerprint:""});
+  const audioCheckEpoch=useRef(0);
+  const [testGuideVisible,setTestGuideVisible]=useState(()=>localStorage.getItem("mockInterview.testGuideSeen")!=="1");
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [decisionModels, setDecisionModels] = useState<string[]>([]);
   const [answerModels, setAnswerModels] = useState<string[]>([]);
@@ -576,6 +581,18 @@ function Main() {
     try { setDevices(JSON.parse(await invoke<string>("list_audio_devices"))); }
     catch (cause) { setError(`读取音频设备失败：${String(cause)}`); }
   }, []);
+  const checkGuideAudio=useCallback(async()=>{
+    const config=settingsRef.current;const fingerprint=JSON.stringify([config.mic,config.output]);
+    const epoch=++audioCheckEpoch.current;
+    setAudioCheck({ready:false,checking:true,error:"",fingerprint});
+    try {
+      const ready=await invoke<boolean>("check_audio_devices",{mic:config.mic,output:config.output});
+      if(epoch===audioCheckEpoch.current)setAudioCheck({ready:ready===true,checking:false,error:ready===true?"":"设备未通过检测，请选择可用设备后重试",fingerprint});
+    } catch(cause) {
+      if(epoch===audioCheckEpoch.current)setAudioCheck({ready:false,checking:false,error:String(cause),fingerprint});
+    }
+  },[]);
+  useEffect(()=>{void checkGuideAudio();},[settings.mic,settings.output,devices,checkGuideAudio]);
   const refreshEngines = useCallback(async () => {
     try {
       const raw = JSON.parse(await invoke<string>("list_local_stt_engines")) as Array<{
@@ -1295,13 +1312,17 @@ function Main() {
     commitModelConfig(stage,patch);
   };
 
-  const start = async () => {
+  const start = async (mode?:"video"|"offline") => {
     if(updater.busy || modelRemovalRef.current || practiceWorking || captureStartingRef.current || runningRef.current)return;
     captureStartingRef.current=true;setStartingService(true);
-    try {await startCapture();}
+    try {
+      const selected=mode?{...settingsRef.current,mode,compactView:false,transcriptVisible:true,answerVisible:true}:settingsRef.current;
+      if(mode){settingsRef.current=selected;setSettings(selected);}
+      await startCapture(selected);
+    }
     finally {captureStartingRef.current=false;setStartingService(false);}
   };
-  const startCapture = async () => {
+  const startCapture = async (settings:Settings) => {
     setError("");
     if (settings.sttMode === "local" && !chosenModel?.is_downloaded) {setShowSettings(true);setError("请先下载所选语音模型");return;}
     if (settings.sttMode === "api" && !savedKeys[settings.sttApiProvider]) {setShowSettings(true);setError("请先保存语音识别 API 密钥");return;}
@@ -1514,6 +1535,7 @@ function Main() {
   const taskbarHidden=Boolean(privacy?.taskbar_hidden);
 
   const visiblePanels=Number(!settings.compactView)+Number(settings.transcriptVisible)+Number(settings.answerVisible);
+  const panelLayout=usePanelLayout("assist",[...(!settings.compactView?["setup"]:[]),...(settings.transcriptVisible?["transcript"]:[]),...(settings.answerVisible?["answer"]:[])],{setup:0.85,transcript:1,answer:1.4});
   return <div className={`app-shell theme-${settings.theme}${settings.compactView?" compact":""}${settings.transcriptVisible?"":" hide-transcript"}${settings.answerVisible?"":" hide-answer"}`} style={{opacity:settings.opacity/100}}>
     <header className="app-header" onMouseDown={dragWindow}>
       <div className="brand">
@@ -1567,7 +1589,7 @@ function Main() {
       onPreviewChange={setPracticePreview} history={practiceHistoryRecorder}
       onModelSettings={()=>{setSettingsTab("models");setShowSettings(true);}}
       guideSetup={{local:settings.answer.api==="ollama",blocked:running || practiceWorking || updater.busy || startingService || pulling || testingModel!==null || linkingModels || deletingModel || managingOllama,
-        modelConnected:connectedModels.answer===settings.answer.model || localStorage.getItem("mockInterview.guideConnection")===JSON.stringify([settings.answer.api,settings.answer.baseUrl,settings.answer.model]),
+        modelConnected:!!settings.answer.model && connectedModels.answer===settings.answer.model,
         modelControls:showSettings?null:stageEditor("answer","生成模型连接",answerModels,answerReady),
         onBranch:local=>{if((settings.answer.api==="ollama")!==local)configureStage("answer",local?"ollama":"deepseek");if(!settings.sharedModelConnection)void toggleSharedModels(true);},
         ollamaFound:!!ollamaRuntime?.executable,ollamaConnected:!!ollamaRuntime?.connected,ollamaChecking,ollamaStarting:startingService,ollamaError:ollamaCheckError,
@@ -1577,11 +1599,8 @@ function Main() {
         onSpeechModel:value=>{update({sttMode:"local",sttEngine:"sherpa_bilingual",sttModel:value});setDownloadError("");setDownloadNotice("");},
         onSpeechDownload:()=>void downloadModel(),onSpeechPath:()=>void chooseSttModelsDirectory(),onSpeechDetect:()=>void refreshEngines(),
         onProfile:()=>{setSettingsTab("profile");setShowSettings(true);},onAudio:()=>{setSettingsTab("audio");setShowSettings(true);},
-        onOfflineTest:()=>{
-          if(running || startingService || practiceWorking || practiceActive || updater.busy || deletingModel || managingOllama)return;
-          update({mode:"offline",compactView:false,transcriptVisible:true,answerVisible:true});
-          setWorkspaceMode("assist");setSettingsTab("audio");setShowSettings(true);
-        }}}
+        profileReady:!!(settings.targetRole.trim() || settings.focusTopics.trim() || settings.selfIntroduction.trim() || settings.answerInstructions.trim() || settings.resumePath || settings.domain!=="general"),
+        audioReady:audioCheck.ready && audioCheck.fingerprint===JSON.stringify([settings.mic,settings.output]),audioChecking:audioCheck.checking,audioError:audioCheck.error,onAudioCheck:()=>void checkGuideAudio()}}
       onConfigChange={onPracticeConfigChange} profileEpoch={profileEpoch}
       resume={resume} analysis={resumeAnalysis} resumePath={settings.resumePath} resumeError={resumeError}
       onResumeImported={importResume} onAnalysis={storeResumeAnalysis} onClearResume={clearResume}
@@ -1589,9 +1608,12 @@ function Main() {
       onRoleChange={value=>update({targetRole:value})} onTopicsChange={value=>update({focusTopics:value})}
       setupVisible={practiceSetupVisible} feedbackVisible={practiceFeedbackVisible}
       stt={{mode:settings.sttMode,engine:settings.sttEngine,model:settings.sttModel,
-        apiProvider:settings.sttApiProvider,apiModel:settings.sttApiModel,mic:settings.mic,output:settings.output}}/> : <main className="workspace">
-      <section className="left-rail">
+        apiProvider:settings.sttApiProvider,apiModel:settings.sttApiModel,mic:settings.mic,output:settings.output}}/> : <main className="workspace" ref={panelLayout.ref} style={panelLayout.style}>
+      <section className="left-rail" style={panelLayout.panelStyle("setup")}>
         <div className="rail-caption">工作台 <span>01 / 03</span></div>
+        {testGuideVisible&&<TestGuide blocked={startingService || practiceWorking || updater.busy} running={running} transcribed={segments.length>0} understood={!!question} answered={completeMs!==null}
+          onStart={mode=>void start(mode)} onAudio={()=>{setSettingsTab("audio");setShowSettings(true);}}
+          onDismiss={()=>{setTestGuideVisible(false);localStorage.setItem("mockInterview.testGuideSeen","1");}}/>}
         <div className="hero-card"><div className="hero-icon"><AudioLines size={25}/></div><h1>专注听题，<br/>从容作答。</h1><p>听到面试官的问题后，自动提炼关键意图，生成可扫读的中文提示。</p>
           <div className="hero-footer"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "所选 API 会接收对应环节的数据" : "当前为本地模型模式"}</div></div>
         <div className="section-title"><span>当前模式</span><CircleHelp size={15}/></div>
@@ -1604,7 +1626,7 @@ function Main() {
           <div className="meter-foot">{settings.mode==="offline" ? "麦克风用于提问；不采集系统声音" : locked?<><LockKeyhole size={13}/> 你正在说话，提示更新已锁定</>:settings.mode==="live" && settings.micTranscription ? "麦克风转录用于理解追问" : settings.mode==="video" ? "从视频音轨识别问题与追问" : "麦克风仅用于控制提示更新"}</div></div>
         <div className="rail-note"><span>使用提示</span><p>{settings.mode==="offline" ? "在设置中选择提问麦克风，点击开始聆听后说出问题。先核对转录，再核对模型理解的问题；也可先说背景，再追加追问。此模式不区分麦克风中的说话人，请用它测试提问。" : "播放视频时，先确认「面试音频」音量条有变化。若始终为 0，请在设置中选择视频实际使用的输出设备。"}</p></div>
       </section>
-      <section className="transcript-panel"><div className="panel-header"><div><span className="panel-kicker">实时识别</span><h2>实时转录</h2></div><span className="panel-count">{segments.length} 条记录</span></div>
+      <section className="transcript-panel" style={panelLayout.panelStyle("transcript")}><div className="panel-header"><div><span className="panel-kicker">实时识别</span><h2>实时转录</h2></div><span className="panel-count">{segments.length} 条记录</span></div>
         <div className="transcript-scroll" ref={transcriptScrollRef} onScroll={event=>{
           const node=event.currentTarget;
           followTranscriptRef.current=node.scrollHeight-node.clientHeight-node.scrollTop<56;
@@ -1615,7 +1637,7 @@ function Main() {
           </div>
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
       </section>
-      <section className="answer-panel"><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
+      <section className="answer-panel" style={panelLayout.panelStyle("answer")}><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
         <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div></div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
               value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
@@ -1642,6 +1664,7 @@ function Main() {
           </div>
         <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? "已保存的自我介绍" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
       </section>
+      {panelLayout.dividers}
     </main>}
     {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
       <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志",history:"历史会话"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
@@ -1661,13 +1684,16 @@ function Main() {
               disabled={privacyBusy || !privacy || (taskbar && !restoreReady)}
               onClick={()=>void changePrivacy(capture,taskbar)}>{name}</button>)}
           </div>
-          <div className="privacy-row"><div><strong>排除屏幕捕获</strong><small>同时作用于主窗口和悬浮窗</small></div>
+          <div className="privacy-row"><div><strong>{privacy?.capture_mode==="blackout"?"录屏兼容遮挡":"排除屏幕捕获"}</strong><small>同时作用于主窗口和悬浮窗</small></div>
             <button className={captureExcluded?"privacy-switch on":"privacy-switch"} aria-pressed={captureExcluded}
               disabled={privacyBusy || !privacy} onClick={()=>void changePrivacy(!captureExcluded,taskbarHidden)}>{captureExcluded?"已开启":"已关闭"}</button></div>
           <div className="privacy-row"><div><strong>隐藏任务栏与 Alt+Tab</strong><small>窗口仍留在屏幕上，可直接操作；{restoreShortcutLabel || "恢复快捷键准备中"} 可恢复任务栏入口</small></div>
             <button className={taskbarHidden?"privacy-switch on":"privacy-switch"} aria-pressed={taskbarHidden}
               disabled={privacyBusy || !privacy || (!taskbarHidden && !restoreReady)}
               onClick={()=>void changePrivacy(captureExcluded,!taskbarHidden)}>{taskbarHidden?"已开启":"已关闭"}</button></div>
+          <p className="setting-help" role="status">{privacy?.capture_mode==="blackout"
+            ?`当前系统${privacy.windows_build?` build ${privacy.windows_build}`:"版本无法确认"}使用兼容遮挡，录屏中可能显示黑块。Windows 10 2004（build 19041）之前不支持直接排除窗口，无法保证显示背后的画面。`
+            :"Windows 10 2004 及以上支持窗口排除；仍取决于捕获方式，部分录屏或远程桌面可能显示黑块或窗口。请用实际共享方式验证。"}</p>
           <p className="setting-help">窗口样式状态：主窗口捕获排除 {privacy?.launcher_capture_excluded?"已设置":"未设置"}；悬浮窗 {privacy?.overlay_capture_excluded?"已设置":"未设置"}；任务栏隐藏 {taskbarHidden?"已设置":"未设置"}。{restoreReady?"恢复快捷键可用。":"恢复快捷键不可用，不能隐藏任务栏。"}请以任务栏和实际共享画面为准。</p>
           <p className="setting-help">“隐藏任务栏”只隐藏主窗口在任务栏和 Alt+Tab 的入口，不会缩小或关闭窗口。需要恢复时，点击“恢复普通模式”，或按上方显示的恢复快捷键。录屏排除与此独立。</p>
           {privacyError && <div className="error-box" role="alert">{privacyError}</div>}

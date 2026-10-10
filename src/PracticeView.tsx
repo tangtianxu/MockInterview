@@ -7,6 +7,7 @@ import "./practice.css";
 import { MathText } from "./MathText";
 import type {HistoryRecorder} from "./history";
 import {SetupGuide,type GuideSetup} from "./SetupGuide";
+import {usePanelLayout} from "./usePanelLayout";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
@@ -72,6 +73,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   const unlistenRef = useRef<UnlistenFn[]>([]);
   const seenSegmentsRef = useRef(new Set<string>());
   const [error, setError] = useState("");
+  const panelLayout=usePanelLayout("practice",[...(setupVisible?["setup"]:[]),"dialogue",...(feedbackVisible?["feedback"]:[])],{setup:0.8,dialogue:1.6,feedback:1.1},guideVisible&&!active?["dialogue","setup","feedback"]:undefined);
   const local = model.api === "ollama";
   const average = useMemo(() => turns.length ? (turns.reduce((sum, turn) => sum + turn.feedback.score, 0) / turns.length).toFixed(1) : "—", [turns]);
   useEffect(() => {localStorage.setItem("interviewCue.practiceConfig",JSON.stringify(config));onConfigChange?.();},[config,onConfigChange]);
@@ -313,8 +315,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
   },[]);
   useEffect(() => {if (!active && micOnRef.current) void stopMic();},[active]);
 
-  return <main className={`practice-workspace${setupVisible?"":" practice-hide-setup"}${feedbackVisible?"":" practice-hide-feedback"}${guideVisible && !active && !busy?" practice-with-guide":""}`}>
-    <section className="practice-setup">
+  return <main className={`practice-workspace${setupVisible?"":" practice-hide-setup"}${feedbackVisible?"":" practice-hide-feedback"}${guideVisible && !active && !busy?" practice-with-guide":""}`} ref={panelLayout.ref} style={panelLayout.style}>
+    <section className="practice-setup" style={panelLayout.panelStyle("setup")}>
       <div className="hero-card practice-hero"><div className="hero-icon"><AudioLines size={25}/></div>
         <h1>练习表达，<br/>看清薄弱点。</h1><p>模型担任模拟面试官。你作答后，它给出参考反馈与下一题。</p>
         <button className="practice-secondary" disabled={active || !!busy || micStarting || updating} onClick={()=>setGuideVisible(value=>!value)}>使用指南</button></div>
@@ -346,7 +348,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           {!!analysis.suggestedTopics?.length && <small>建议覆盖：{analysis.suggestedTopics.join("、")}</small>}</div>}
       </div>
     </section>
-    <section className="practice-dialogue">
+    <section className="practice-dialogue" style={panelLayout.panelStyle("dialogue")}>
       <div className="panel-header"><div><span className="panel-kicker">模拟现场</span><h2>模拟面试</h2></div><span className="panel-count"><Clock3 size={15}/> {minutesLabel(remaining)}</span></div>
       <div className="practice-controls">
         {!active && <button className="start-btn" disabled={updating || !!busy || micStarting} onClick={()=>void start()}><Play size={15}/> {turns.length ? "重新开始" : "开始练习"}</button>}
@@ -375,7 +377,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       {question && !feedback && stt.mode==="api" && <div className="practice-api-note">麦克风作答会按模型设置，将语音发送给所选识别服务。</div>}
       {error && <div className="error-box" role="alert">{error}</div>}
     </section>
-    <section className="practice-feedback">
+    <section className="practice-feedback" style={panelLayout.panelStyle("feedback")}>
       <div className="panel-header"><div><span className="panel-kicker">练习反馈</span><h2>回答复盘</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
       {feedback ? <div className="practice-feedback-body">
         <div className="practice-score">{feedback.score}<span>/ 5</span></div>
@@ -401,5 +403,6 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <button className="start-btn" disabled={!active || !!busy || reference.loading} onClick={()=>void ask()}>下一题</button>
       </div> : <div className="practice-feedback-empty"><Sparkles size={30}/><h3>提交回答后查看反馈</h3><p>评分用于练习，不等同于真实面试评价。</p></div>}
     </section>
+    {panelLayout.dividers}
   </main>;
 }

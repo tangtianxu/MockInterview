@@ -6,6 +6,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  mockWindows('launcher');window.calls=[];window.downloaded=false;window.allowSending=false;window.connected=false;window.progress=payload=>emit('model_download_progress',payload);
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='load_interview_profile')return {settings:new URLSearchParams(location.search).has('legacy')?{api:'ollama',sttModel:'small'}:{},resumeAnalysis:null};if(command==='plugin:app|version')return '1.0.15';
+ if(command==='check_audio_devices')return true;
  if(command==='list_audio_devices')return JSON.stringify({inputs:[],outputs:[]});
  if(command==='list_local_stt_engines')return JSON.stringify([{engine:'sherpa_bilingual',name:'Sherpa',models:['paraformer-zh-en','zipformer-zh-en'].map(model_id=>({definition:{model_id,display_name:model_id,is_streaming:true,download_url:'https://modelscope.cn/models/fixture/resolve/master/model.tar.bz2',filename:'fixture-model'},is_downloaded:model_id==='paraformer-zh-en'&&window.downloaded}))}]);
  if(command==='local_stt_model_directory')return 'C:/models';
@@ -33,7 +34,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await guide.getByText('下载失败怎么办？也可使用浏览器下载',{exact:true}).click();
  assert.equal(await guide.getByRole('button',{name:'使用 API（推荐）',exact:true}).getAttribute('aria-pressed'),'true');
  assert.equal(await guide.getByRole('button',{name:'下载 Ollama',exact:true}).count(),0);
- assert.equal(await guide.locator('[aria-label="已完成"]').count(),0);
+ assert.equal(await guide.locator('[aria-label="已完成"]').count(),1);assert.equal(await guide.locator('.guide-switch-step').count(),0);
  await guide.getByRole('button',{name:'使用 API（推荐）',exact:true}).click();
  await guide.getByRole('button',{name:'检测并连接',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='mvp_test_model_endpoint'));
  await guide.getByText('聊天已连接',{exact:true}).waitFor();assert.equal(await guide.locator('[aria-label="已完成"]').count(),2);
@@ -46,7 +47,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await guide.getByRole('button',{name:'下载语音模型',exact:true}).click();await progress('complete');await guide.getByRole('alert').filter({hasText:'未检测到完整模型'}).waitFor();
  await guide.getByRole('button',{name:'下载语音模型',exact:true}).click();await progress('verifying');await guide.getByRole('button',{name:'正在校验模型…',exact:true}).waitFor();
  await progress('extracting');await guide.getByRole('button',{name:'正在解压模型…',exact:true}).waitFor();await page.evaluate(()=>window.downloaded=true);await progress('complete');await guide.getByRole('button',{name:'语音模型已就绪',exact:true}).waitFor();
- assert.equal(await guide.locator('[aria-label="已完成"]').count(),3);await guide.getByRole('button',{name:'选择语音模型路径',exact:true}).click();
+ assert.equal(await guide.locator('[aria-label="已完成"]').count(),3);assert.equal(await guide.locator('.guide-switch-step').count(),0);await guide.getByRole('button',{name:'先跳过个性化资料',exact:true}).click();await guide.locator('.guide-switch-step').waitFor();assert.equal(await guide.locator('[aria-label="已完成"]').count(),4);await guide.getByRole('button',{name:'选择语音模型路径',exact:true}).click();
  await page.waitForFunction(()=>window.calls.some(c=>c.command==='save_local_stt_model_directory'));
  await guide.getByRole('button',{name:'上传个人简历',exact:true}).click();await guide.getByRole('button',{name:'分析简历',exact:true}).waitFor();
  await guide.getByRole('button',{name:'分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='plugin:dialog|ask'));
@@ -55,12 +56,12 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  const sent=await page.evaluate(()=>window.calls.find(c=>c.command==='practice_model'));assert.equal(sent.args.endpoint.api,'deepseek');assert.equal(sent.args.input.consentToSendResume,true);assert.equal(sent.args.input.resumeText,'SYNTHETIC_RESUME_ONLY');
  assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_local_service').length),0,'API branch must never start Ollama');
  await guide.getByRole('button',{name:'重新分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.filter(c=>c.command==='plugin:dialog|ask').length===3);
- await guide.getByRole('button',{name:'资料已填写 / 暂时跳过',exact:true}).click();await guide.getByRole('button',{name:'已完成效果测试',exact:true}).click();assert.equal(await guide.locator('[aria-label="已完成"]').count(),5);
+ assert.equal(await guide.locator('[aria-label="已完成"]').count(),4);assert.equal(await guide.getByRole('button',{name:'已完成效果测试',exact:true}).count(),0);
  assert.ok(await guide.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'narrow guide must not overflow');await page.screenshot({path:'outputs/onboarding-api-narrow.png'});
  await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).click();await guide.getByRole('button',{name:'下载 Ollama',exact:true}).waitFor();await guide.getByRole('button',{name:'连接并启动 Ollama',exact:true}).click();await guide.getByRole('button',{name:'Ollama 已连接',exact:true}).waitFor();
  await guide.getByRole('button',{name:'下载本地生成模型',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='pull_ollama_model'));
  await guide.getByRole('button',{name:'高级设置：Ollama 路径',exact:true}).click();await page.getByPlaceholder('自动检测或选择 ollama.exe',{exact:true}).waitFor();
- await page.getByRole('button',{name:'完成设置',exact:true}).click();await page.reload();await guide.waitFor();assert.ok(await guide.getByRole('button',{name:'重新检查资料',exact:true}).count());assert.ok(await guide.getByRole('button',{name:'重新测试',exact:true}).count());
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();await page.reload();await guide.waitFor();assert.ok((await guide.innerText()).includes('已跳过'));assert.equal(await guide.locator('.guide-switch-step').count(),0,'previous connection marker is not proof of availability after restart');
  await page.goto(url+'?legacy=1');await guide.waitFor();
  assert.equal(await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).getAttribute('aria-pressed'),'true');
  await page.waitForFunction(()=>window.calls.some(c=>c.command==='mvp_list_models'));
@@ -79,14 +80,21 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await page.evaluate(()=>window.allowSending=true);await removeOllama.click();await page.getByText(/已删除模型 qwen3:4b-instruct/).waitFor();assert.equal(await removeOllama.isDisabled(),true);
  const removed=await page.evaluate(()=>window.calls.find(c=>c.command==='delete_ollama_model').args);assert.equal(removed.model,'qwen3:4b-instruct');assert.equal(removed.baseUrl,'http://127.0.0.1:11434');
  await page.goto(url);await guide.waitFor();
- await guide.getByRole('button',{name:'线下面试：麦克风测试',exact:true}).click();
- await page.getByRole('combobox',{name:'采集模式'}).waitFor();
+ await page.evaluate(()=>window.downloaded=true);await guide.getByRole('button',{name:'重新检测语音模型',exact:true}).click();
+ await page.getByRole('button',{name:'双击切换练习与实时提示页面',exact:true}).dblclick();
+ const testGuide=page.getByRole('region',{name:'转录与回答测试'});await testGuide.waitFor();
+ await testGuide.getByRole('button',{name:'打开 B 站测试视频',exact:true}).click();
+ await page.waitForFunction(()=>window.calls.some(c=>c.command==='plugin:shell|open'&&JSON.stringify(c.args).includes('BV1XzyWY6EJC')));
+ await testGuide.getByRole('button',{name:'麦克风测试',exact:true}).click();
+ assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_capture_per_party').length),0,'selecting a branch does not record');
+ await testGuide.getByRole('button',{name:'开始麦克风测试',exact:true}).click();
+ await page.getByRole('button',{name:'结束练习',exact:true}).waitFor();
+ const captured=await page.evaluate(()=>window.calls.find(c=>c.command==='start_capture_per_party').args);
+ const them=JSON.parse(captured.themConfig),you=JSON.parse(captured.youConfig);assert.equal(them.device_id,'default');assert.equal(them.is_input_device,true);assert.equal(you.stt_provider,'disabled');
+ await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'音频设备',exact:true}).click();
  assert.equal(await page.getByRole('combobox',{name:'采集模式'}).inputValue(),'offline');
- assert.equal(await page.getByRole('combobox',{name:'提问麦克风'}).inputValue(),'default');
  assert.equal(await page.getByRole('combobox',{name:'面试音频输出设备'}).isDisabled(),true);
- assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_capture_per_party').length),0,'guide does not start recording automatically');
- await page.getByRole('button',{name:'完成设置',exact:true}).click();
- await page.getByRole('button',{name:'开始聆听',exact:true}).waitFor();
+ await page.getByRole('button',{name:'完成设置',exact:true}).click();await page.getByRole('button',{name:'结束练习',exact:true}).click();
  await browser.close();browser=null;
  }finally{if(browser)await browser.close();server.kill();await unlink(fixture).catch(()=>{});}
 });

@@ -21,7 +21,7 @@ mockIPC(async(command,args)=>{
  if(command==='mvp_list_models')return [];
  if(command==='local_stt_model_directory')return 'fixture';
  if(command==='ollama_runtime_status')return {executable:null,connected:false,configuredExecutable:null,modelsDirectory:null,configFile:'fixture'};
- if(command==='get_privacy_display_state'||command==='set_taskbar_hidden')return {errors:[],launcher_capture_excluded:true,overlay_capture_excluded:true,taskbar_hidden:true};
+ if(command==='get_privacy_display_state'||command==='set_taskbar_hidden')return {errors:[],launcher_capture_excluded:true,overlay_capture_excluded:true,taskbar_hidden:true,capture_mode:params.has('legacy')?'blackout':'exclude',windows_build:params.has('legacy')?18363:22631};
  if(command==='has_api_key'||command.includes('is_registered'))return false;
  return null;
 },{shouldMockEvents:true});
@@ -91,7 +91,7 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
       if(viewport.width<=940){
         const before=await page.locator('.app-header').boundingBox();
         await page.locator('.workspace').evaluate(element=>{element.scrollTop=500;});
-        assert.ok(await page.locator('.workspace').evaluate(element=>element.scrollTop)>0);
+        assert.ok(await page.locator('.workspace').evaluate(element=>element.scrollHeight<=element.clientHeight || element.scrollTop>0));
         assert.deepEqual(await page.locator('.app-header').boundingBox(),before);
       }
       if(viewport.width===760&&viewport.height===850){
@@ -106,7 +106,25 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
         await page.screenshot({path:`outputs/window-chrome-${theme}.png`});
       }
     }
+    // Each workspace uses actual pointer dragging and retains proportions across remounts.
+    for(const workspace of ['.workspace','.practice-workspace']){
+      if(workspace==='.practice-workspace')await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();
+      const main=page.locator(workspace);const separator=main.getByRole('separator').first();
+      assert.equal(await main.getByRole('separator').count(),2);
+      const panel=main.locator('section').first();const before=await panel.boundingBox();const handle=await separator.boundingBox();
+      await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(handle.x+handle.width/2+60,handle.y+handle.height/2,{steps:6});await page.mouse.up();
+      const after=await panel.boundingBox();assert.ok(after.width-before.width>45,'divider must redistribute panel widths');
+      assert.equal(await separator.evaluate(el=>getComputedStyle(el).cursor),'col-resize');
+      const key=workspace==='.workspace'?'assist':'practice';assert.ok(await page.evaluate(key=>!!localStorage.getItem('mockInterview.panels.'+key),key));
+      const other=main.locator('section').filter({has:page.locator('.panel-header')});
+      assert.ok(await other.first().evaluate(el=>el.scrollWidth<=el.clientWidth+1));
+    }
+    assert.equal(await page.locator('.resize-corner').count(),8);
+    assert.equal(await page.locator('.resize-east').evaluate(el=>getComputedStyle(el).cursor),'ew-resize');
+    assert.equal(await page.locator('.resize-north').evaluate(el=>getComputedStyle(el).cursor),'ns-resize');
+    await page.goto(url+'?legacy=1');await page.locator('.app-version').waitFor();
     await page.getByRole('button',{name:'设置',exact:true}).click();await checkDrags('.drawer-head');
+    await page.getByRole('tab',{name:'界面与隐私',exact:true}).click();await page.getByText('录屏兼容遮挡',{exact:true}).waitFor();assert.match(await page.locator('.settings-drawer').innerText(),/build 18363.*兼容遮挡/);
     await page.getByRole('button',{name:'关闭设置'}).click();
     const before=await countDrags();await page.locator('.panel-header').first().dispatchEvent('mousedown',{button:0});
     assert.equal(await countDrags(),before,'content below title divider must not move the window');

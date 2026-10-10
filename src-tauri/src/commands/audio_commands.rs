@@ -457,6 +457,20 @@ pub async fn test_audio_device(device_id: String) -> Result<bool, String> {
     device_manager::test_device(&device_id)
 }
 
+/// Validate each device in its actual role; "default" must not test the mic twice.
+/// This checks endpoint availability and supported format, without recording audio.
+#[command]
+pub async fn check_audio_devices(mic: String, output: String) -> Result<bool, String> {
+    use cpal::traits::DeviceTrait;
+    tokio::task::spawn_blocking(move || {
+        device_manager::find_input_device(&mic)?
+            .default_input_config().map_err(|e| format!("所选麦克风不可用：{e}"))?;
+        device_manager::find_output_device(&output)?
+            .default_output_config().map_err(|e| format!("所选输出设备不可用：{e}"))?;
+        Ok(true)
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Enable or disable audio recording to file.
 #[command]
 pub async fn set_recording_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {

@@ -74,6 +74,8 @@
 .theme-light .practice-correct{color:#21694f}
 .theme-light .practice-reference-answer,.theme-light .practice-history-reference{border-color:#c4dcd0}
 .theme-light .practice-history-reference{color:#395f50}.theme-light .practice-reference-error{color:#b24134}
+.practice-workspace .practice-conversation{min-height:0;max-height:none}
+.practice-workspace .practice-conversation>*{flex-shrink:0}
 @media(max-width:1050px) and (min-width:681px){
   .practice-workspace:not(.practice-hide-setup):not(.practice-hide-feedback){
     grid-template-columns:minmax(220px,260px) minmax(0,1fr);

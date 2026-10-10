@@ -19,6 +19,14 @@ pub struct PrivacyDisplayState {
     pub overlay_capture_excluded: bool,
     pub taskbar_hidden: bool,
     pub errors: Vec<String>,
+    pub capture_mode: &'static str,
+    pub windows_build: Option<u32>,
+}
+
+fn capture_affinity(build: Option<u32>) -> u32 {
+    // WDA_EXCLUDEFROMCAPTURE requires Windows 10 version 2004 (build 19041).
+    // Older systems support WDA_MONITOR: captured content becomes a black block.
+    if build.is_some_and(|value| value >= 19041) { 0x11 } else { 0x1 }
 }
 
 fn saved(app: &AppHandle) -> SavedPrivacy {
@@ -65,6 +73,19 @@ mod native {
 
     static ORIGINAL_STYLES: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
 
+    pub fn windows_build() -> Option<u32> {
+        #[repr(C)]
+        struct Version {size:u32,major:u32,minor:u32,build:u32,platform:u32,service_pack:[u16;128]}
+        #[link(name="ntdll")]
+        unsafe extern "system" { fn RtlGetVersion(version:*mut Version) -> i32; }
+        static BUILD: OnceLock<Option<u32>>=OnceLock::new();
+        *BUILD.get_or_init(|| {
+            let mut version=Version{size:std::mem::size_of::<Version>() as u32,major:0,minor:0,build:0,platform:0,service_pack:[0;128]};
+            // RtlGetVersion is independent of the application's compatibility manifest.
+            if unsafe {RtlGetVersion(&mut version)} >= 0 {Some(version.build)} else {None}
+        })
+    }
+
     fn window(app: &AppHandle, label: &str) -> Result<HWND, String> {
         let window = app.get_webview_window(label)
             .ok_or_else(|| format!("窗口 {label} 不存在"))?;
@@ -74,7 +95,7 @@ mod native {
 
     pub fn capture(app: &AppHandle, label: &str, enabled: bool) -> Result<(), String> {
         let hwnd = window(app, label)?;
-        let wanted = if enabled { 0x0000_0011 } else { 0 };
+        let wanted = if enabled { super::capture_affinity(windows_build()) } else { 0 };
         unsafe {
             SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(wanted))
                 .map_err(|e| format!("窗口 {label} 捕获排除设置失败：{e}"))?;
@@ -93,7 +114,7 @@ mod native {
         let mut actual = 0;
         unsafe { GetWindowDisplayAffinity(hwnd, &mut actual) }
             .map_err(|e| format!("窗口 {label} 无法读取捕获排除状态：{e}"))?;
-        Ok(actual == 0x0000_0011)
+        Ok(actual == super::capture_affinity(windows_build()))
     }
 
     pub fn taskbar(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -193,10 +214,12 @@ pub fn get_privacy_display_state(app: AppHandle) -> PrivacyDisplayState {
             Ok(value) => value,
             Err(error) => { errors.push(error); false }
         };
-        PrivacyDisplayState { launcher_capture_excluded, overlay_capture_excluded, taskbar_hidden, errors }
+        let windows_build=native::windows_build();
+        PrivacyDisplayState { launcher_capture_excluded, overlay_capture_excluded, taskbar_hidden, errors,
+            capture_mode:if capture_affinity(windows_build)==0x11 {"exclude"} else {"blackout"},windows_build }
     }
     #[cfg(not(windows))]
-    { let _ = app; PrivacyDisplayState { launcher_capture_excluded:false, overlay_capture_excluded:false, taskbar_hidden:false, errors:vec!["仅支持 Windows".into()] } }
+    { let _ = app; PrivacyDisplayState { launcher_capture_excluded:false, overlay_capture_excluded:false, taskbar_hidden:false, errors:vec!["仅支持 Windows".into()],capture_mode:"unsupported",windows_build:None } }
 }
 
 #[tauri::command]
@@ -244,4 +267,16 @@ pub fn set_taskbar_hidden(app: AppHandle, enabled: bool) -> Result<PrivacyDispla
 #[tauri::command]
 pub fn get_saved_taskbar_preference(app: AppHandle) -> bool {
     saved(&app).taskbar_hidden
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_affinity;
+    #[test]
+    fn capture_compatibility_uses_real_windows_build() {
+        assert_eq!(capture_affinity(Some(18363)),1);
+        assert_eq!(capture_affinity(Some(19041)),0x11);
+        assert_eq!(capture_affinity(Some(22631)),0x11);
+        assert_eq!(capture_affinity(None),1);
+    }
 }

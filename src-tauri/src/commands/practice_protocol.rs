@@ -11,6 +11,30 @@ pub fn knowledge_prompt(task: &str) -> String {
     format!("{KNOWLEDGE_PRINCIPLES}\n{FORMULA_GUIDANCE}\n{task}")
 }
 
+pub fn parse_json_object(raw: &str) -> Result<Value, String> {
+    let text=raw.trim();
+    let text=if text.starts_with("```") && text.ends_with("```") {
+        text.strip_prefix("```json").or_else(||text.strip_prefix("```"))
+            .unwrap_or(text).trim_end_matches("```").trim()
+    } else {text};
+    let value:Value=serde_json::from_str(text).map_err(|e|format!("模型返回的 JSON 无效：{e}"))?;
+    if !value.is_object() {return Err("模型必须返回 JSON 对象".into());}
+    Ok(value)
+}
+
+pub fn safe_resume_analysis(value:&Value) -> Result<Value,String> {
+    let summary=value["summary"].as_str().filter(|text|!text.trim().is_empty())
+        .ok_or("简历分析缺少有效 summary 字符串")?;
+    let mut result=json!({"summary":summary.chars().take(1000).collect::<String>()});
+    for field in ["skills","projects","uncertainties","suggestedTopics"] {
+        let items=value[field].as_array().ok_or_else(||format!("简历分析字段 {field} 必须是字符串数组"))?;
+        if items.iter().any(|item|!item.is_string()) {return Err(format!("简历分析字段 {field} 包含非字符串内容"));}
+        result[field]=json!(items.iter().filter_map(Value::as_str).take(30)
+            .map(|text|text.chars().take(600).collect::<String>()).collect::<Vec<_>>());
+    }
+    Ok(result)
+}
+
 // One bounded background is reused for asking, evaluation and reference answers.
 // Consent belongs to each request; it is never inherited from a previous call.
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -126,6 +150,23 @@ pub fn safe_feedback(result: &Value, answer: &str, kind: &str) -> Result<Value, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_requires_an_object_and_strict_syntax() {
+        assert!(super::parse_json_object("{summary: 'bad'}").is_err());
+        assert!(super::parse_json_object("[]").is_err());
+        assert!(super::parse_json_object("```json\n{\"summary\":\"okay\"}\n```").is_ok());
+        assert!(super::parse_json_object("{\"summary\":\"unfinished").is_err());
+    }
+    #[test]
+    fn resume_fields_are_checked_and_unrequested_stories_removed() {
+        let good=serde_json::json!({"summary":"from source","skills":[],"projects":[],"uncertainties":[],"suggestedTopics":[],"betterAnswer":"invented story"});
+        let safe=super::safe_resume_analysis(&good).unwrap();
+        assert!(safe.get("betterAnswer").is_none());
+        let mut bad=good.clone();bad["projects"]=serde_json::json!([{"made_up":"details"}]);
+        assert!(super::safe_resume_analysis(&bad).is_err());
+        bad=good;bad.as_object_mut().unwrap().remove("skills");
+        assert!(super::safe_resume_analysis(&bad).is_err());
+    }
     use super::*;
     #[test]
     fn same_context_survives_transport_and_checks_each_remote_request() {

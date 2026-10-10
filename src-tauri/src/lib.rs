@@ -457,6 +457,7 @@ pub fn run() {
             audio_commands::stop_capture,
             audio_commands::get_audio_level,
             audio_commands::test_audio_device,
+            audio_commands::check_audio_devices,
             audio_commands::start_audio_test,
             audio_commands::stop_audio_test,
             audio_commands::set_recording_enabled,
