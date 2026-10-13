@@ -1,6 +1,6 @@
 [package]
 name = "interview-cue"
-version = "1.0.19"
+version = "1.0.29"
 description = "Local Chinese interview answer cues"
 authors = ["InterviewCue contributors", "NexQ contributors"]
 edition = "2021"
@@ -50,6 +50,7 @@ base64 = "0.22"
 whisper-rs = "0.16"
 sha2 = "0.10"
 zip = "2"
+quick-xml = "0.37"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries", "ndarray", "load-dynamic"] }
 ndarray = "0.17"  # Must match ort's ndarray version
 rustfft = "6"

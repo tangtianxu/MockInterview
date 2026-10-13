@@ -1,0 +1,7 @@
+/* Modal content scrolls below a full-width native window drag header. */
+.settings-scrim{flex-direction:column;align-items:flex-end}
+.drawer-head.settings-titlebar{width:100%;padding:12px 22px;background:#111b29;border-bottom:1px solid #283748;min-height:64px}
+.settings-titlebar h2{margin:3px 0 0;font-size:18px}
+.settings-scrim .settings-drawer{flex:1;min-height:0;height:auto;border-radius:0 0 0 20px}
+.theme-light .drawer-head.settings-titlebar{background:#faf9f5;border-color:#e1e7de}
+.knowledge-header,.knowledge-send-title,.settings-titlebar{user-select:none}

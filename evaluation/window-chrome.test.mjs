@@ -139,6 +139,15 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
     assert.equal(await page.locator('.resize-corner').count(),8);
     assert.equal(await page.locator('.resize-east').evaluate(el=>getComputedStyle(el).cursor),'ew-resize');
     assert.equal(await page.locator('.resize-north').evaluate(el=>getComputedStyle(el).cursor),'ns-resize');
+    for(const viewport of [{width:600,height:480},{width:1360,height:850}]){
+      await page.setViewportSize(viewport);await page.getByRole('button',{name:'设置',exact:true}).click();await checkDrags('.drawer-head');
+      const title=await page.locator('.settings-titlebar').boundingBox();assert.ok(title.width>=viewport.width-30,'settings need a full-width drag title bar');
+      const titleBottom=title.y+title.height,drawer=await page.locator('.settings-drawer').boundingBox();assert.ok(drawer.y>=titleBottom-1,'settings contents must remain below the title bar');assert.ok(drawer.y+drawer.height<=viewport.height+1);
+      await page.locator('.settings-titlebar h2').click();assert.equal(await page.locator('.settings-drawer').count(),1,'clicking the title must not dismiss settings');
+      await page.getByRole('tab',{name:'个人资料',exact:true}).click();const beforeInput=await countDrags();await page.locator('.settings-drawer input,.settings-drawer textarea').first().dispatchEvent('mousedown',{button:0});assert.equal(await countDrags(),beforeInput,'editing settings must not drag the window');
+      if(viewport.width===600)await page.screenshot({path:'outputs/settings-drag-narrow-light.png'});
+      await page.getByRole('button',{name:'关闭设置'}).click();
+    }
     await page.goto(url+'?legacy=1');await page.locator('.app-version').waitFor();
     await page.getByRole('button',{name:'设置',exact:true}).click();await checkDrags('.drawer-head');
     await page.getByRole('tab',{name:'界面与隐私',exact:true}).click();await page.getByText('录屏兼容遮挡',{exact:true}).waitFor();assert.match(await page.locator('.settings-drawer').innerText(),/build 18363.*兼容遮挡/);

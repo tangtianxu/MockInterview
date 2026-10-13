@@ -37,6 +37,8 @@ pub struct DecisionInput {
     pub video_mode: bool,
     #[serde(default)]
     pub topic_background: String,
+    #[serde(default)]
+    pub project_knowledge: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -257,6 +259,8 @@ pub async fn mvp_decide(app: AppHandle, endpoint: ModelEndpoint, input: Decision
         bounded_current_transcript(&input.candidate_reply),
         if input.is_final {"音频片段已稳定"} else {"识别中，文字仍可能变化"},
         bounded_current_transcript(&input.current_text));
+    let project_system=if input.project_knowledge {format!("{system}\n本机已启用项目知识库：第5条中的项目实际经历问题现在允许提取为 question/show 或追问 revise，完整保留项目主体、请求和条件，由应用检索已确认答案或有来源资料后回答。不要在判别中猜测项目答案；年龄、家乡等无关个人隐私仍 personal/wait。未说明主体的项目追问需要结合最近对话补全，无法确定时 uncertain/wait。")}else{system.to_string()};
+    let system=project_system.as_str();
     let raw = chat(&app, &endpoint, system, &user, 360).await?;
     let first_trimmed = raw.trim().trim_start_matches("```json").trim_start_matches("```")
         .trim_end_matches("```").trim();
@@ -317,9 +321,10 @@ fn answer_system(base: &str, instructions: Option<&str>) -> String {
 pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: String,
     question: String, question_context: Option<Vec<String>>, focus: Vec<String>, key_terms: Option<Vec<String>>, constraints: Vec<String>,
     uncertain_terms: Vec<String>, answer_instructions: Option<String>, practice_reference: Option<bool>,
-    practice_context: Option<PracticeContext>) -> Result<(), String> {
+    practice_context: Option<PracticeContext>,knowledge_context:Option<super::knowledge_commands::AnswerContext>) -> Result<(), String> {
     if question.trim().is_empty() { return Err("没有可回答的问题".into()); }
     if let Some(context) = &practice_context { context.authorize(endpoint.api == "ollama")?; }
+    if let Some(context)=&knowledge_context {super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama")?;}
     let key_terms = key_terms.unwrap_or_default();
     let url = endpoint_url(&endpoint, "chat")?;
     let system = answer_system("你是中文技术面试知识提示助手。英文术语首次出现时给中文含义，能确认的缩写先给英文全称及中文含义。概念题用‘定义：’和‘原理：’两段，每段一到两句；原理说明输入或触发、关键处理步骤和结果。比较题用‘结论：’和‘依据：’，其他任务用‘要点：’和‘原因：’。优先讲实际机制，避免空泛作用。不要 Markdown、寒暄或重复问题。", answer_instructions.as_deref());
@@ -334,8 +339,11 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         format!("{}\n{}", context.background(), user)
     } else { user };
     let system = knowledge_prompt(&system);
+    let (system,user)=if let Some(context)=&knowledge_context {
+        (format!("{system}\n本次有项目知识库依据。直接回答当前项目问题；用户已确认问答中的经历可引用，原始代码/报告只证明材料记载，不能据此认定个人贡献。没有支持的信息明确列为待核实，不补造数字、动机或实验。按当前任务组织要点与依据，不机械给定义，不把可选方案说成实际实现。"),format!("{}\n当前任务：\n{user}",context.text()))
+    }else{(system,user)};
     let practice_reference = practice_reference.unwrap_or(false);
-    let system = if practice_reference {format!("{system}\n本次是模拟面试复盘。针对题目逐点给出参考答案，用 4 到 8 句解释因果链和基本思想，不限于两段。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};
+    let system = if practice_reference && knowledge_context.is_none() {format!("{system}\n本次是模拟面试复盘。针对题目逐点给出参考答案，用 4 到 8 句解释因果链和基本思想，不限于两段。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};
     // Prompt controls brevity; the transport budget must leave room for complete
     // Chinese explanations, acronym expansions and formula source.
     let token_limit = if practice_reference {1536} else {1024};
@@ -497,6 +505,7 @@ pub struct PracticeRequest {
     pub question_kind: String,
     pub question: String,
     pub answer: String,
+    pub knowledge_context:Option<super::knowledge_commands::AnswerContext>,
 }
 
 #[command]
@@ -511,6 +520,7 @@ pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: Prac
         return Err("练习范围、难度或时长无效".into());
     }
     input.context.authorize(endpoint.api == "ollama")?;
+    if let Some(context)=&input.knowledge_context {super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama")?;}
     if input.action == "ask" && matches!(input.context.scope.as_str(), "project" | "mixed" | "comprehensive") && input.context.resume_analysis.trim().is_empty() {
         return Err("项目、混合或综合练习需要先分析简历".into());
     }
@@ -548,6 +558,9 @@ pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: Prac
         ),
     };
     let system = knowledge_prompt(system);
+    let(system,user)=if let Some(context)=&input.knowledge_context {
+        (format!("{system}\n本次有用户确认的标准回答作为项目参考。评价一律使用 corrections 与 missingPoints 的具体错漏结构（即 technical 的 JSON 结构），但不改变原题型。只对题目实际要求评价，不要求逐字复述标准回答，其他合理且有依据的答案也可接受；不能把参考答案当作唯一可能正确的表述。"),format!("{}\n{user}",context.text()))
+    }else{(system,user)};
     if input.action == "ask" {
         let mut rejection = String::new();
         for _ in 0..3 {
@@ -576,8 +589,8 @@ pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: Prac
         let mut retry = String::new();
         for attempt in 0..2 {
             let result = practice_json(&app, &endpoint, &system, &format!("{user}{retry}"), 0.2, 1_100).await?;
-            match safe_feedback(&result, &input.answer, kind) {
-                Ok(feedback) => return Ok(feedback),
+            match safe_feedback(&result, &input.answer, if input.knowledge_context.is_some(){"technical"}else{kind}) {
+                Ok(mut feedback) => {feedback["questionKind"]=serde_json::json!(kind);return Ok(feedback);},
                 Err(error) if attempt == 0 => retry=format!("\n上次输出结构不完整：{error}。重新评价并输出完整 JSON；没有错漏也必须返回空数组。"),
                 Err(error) => return Err(error),
             }
@@ -603,8 +616,13 @@ async fn practice_json(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, 
     }
 }
 
-async fn practice_json_text(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &str,
+pub(super) async fn practice_json_text(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &str,
     temperature: f64, limit: u32) -> Result<String,String> {
+    completion_json_payload(app,endpoint,system,user,temperature,limit).await.map(|(text,_)|text)
+}
+
+pub(super) async fn completion_json_payload(app: &AppHandle, endpoint: &ModelEndpoint, system: &str, user: &str,
+    temperature: f64, limit: u32) -> Result<(String,serde_json::Value),String> {
     let url = endpoint_url(endpoint, "chat")?;
     let messages = serde_json::json!([{"role":"system","content":system},{"role":"user","content":user}]);
     let body = if endpoint.api == "ollama" {
@@ -634,7 +652,7 @@ async fn practice_json_text(app: &AppHandle, endpoint: &ModelEndpoint, system: &
     let raw = if endpoint.api == "ollama" { value["message"]["content"].as_str() }
         else { value["choices"][0]["message"]["content"].as_str() }
         .ok_or("模型没有返回练习内容")?;
-    Ok(raw.to_owned())
+    Ok((raw.to_owned(),if endpoint.api=="ollama" {serde_json::json!({"prompt_tokens":value["prompt_eval_count"],"completion_tokens":value["eval_count"]})}else{value["usage"].clone()}))
 }
 
 #[cfg(test)]

@@ -18,5 +18,6 @@ pub mod tray_commands;
 pub mod updater_commands;
 pub mod mvp_commands;
 pub mod history_commands;
-mod practice_protocol;
+pub mod knowledge_commands;
+pub(crate) mod practice_protocol;
 mod answer_stream;

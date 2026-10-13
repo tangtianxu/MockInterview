@@ -5,6 +5,10 @@ pub mod credentials;
 pub mod db;
 pub mod intelligence;
 pub mod interview_library;
+pub mod knowledge;
+pub mod knowledge_documents;
+pub mod knowledge_build;
+pub mod knowledge_intake;
 pub mod rag;
 pub mod llm;
 pub mod state;
@@ -22,6 +26,7 @@ use tauri::{
 // == MODULE COMMANDS: audio ==
 use commands::audio_commands;
 use commands::history_commands;
+use commands::knowledge_commands;
 // == MODULE COMMANDS: stt ==
 use commands::stt_commands;
 // == MODULE COMMANDS: llm ==
@@ -447,6 +452,30 @@ pub fn run() {
             mvp_commands::mvp_copy_model_key,
             mvp_commands::mvp_decide,
             mvp_commands::mvp_answer,
+            knowledge_commands::knowledge_snapshot,
+            knowledge_commands::knowledge_record_read,
+            knowledge_commands::knowledge_save_inbox,
+            knowledge_commands::knowledge_import_questions,
+            knowledge_commands::knowledge_open_folder,
+            knowledge_commands::knowledge_import_folder,
+            knowledge_commands::knowledge_import_files,
+            knowledge_commands::knowledge_prepare_organization,
+            knowledge_commands::knowledge_assign_projects,
+            knowledge_commands::knowledge_agent_prompt,
+            knowledge_commands::knowledge_export_agent_prompt,
+            knowledge_commands::knowledge_export_agent_kit,
+            knowledge_commands::knowledge_read_question_document,
+            knowledge_commands::knowledge_configure,
+            knowledge_commands::knowledge_save_question,
+            knowledge_commands::knowledge_delete_question,
+            knowledge_commands::knowledge_history_questions,
+            knowledge_commands::knowledge_lookup,
+            knowledge_commands::knowledge_prepare,
+            knowledge_commands::knowledge_prepare_build,
+            knowledge_commands::knowledge_run,
+            knowledge_commands::knowledge_discard_plan,
+            knowledge_commands::knowledge_commit,
+            knowledge_commands::knowledge_export_questions,
             mvp_commands::mvp_explain,
             mvp_commands::mvp_cancel_answer,
             mvp_commands::practice_read_resume,

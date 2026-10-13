@@ -30,7 +30,9 @@ if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
     if (-not (Test-Path -LiteralPath $releaseKey)) {
         throw 'Release signing key required. Configure TAURI_SIGNING_PRIVATE_KEY before building.'
     }
-    $env:TAURI_SIGNING_PRIVATE_KEY = $releaseKey
+    # Read the file explicitly: the signer string input should not depend on
+    # canonicalizing a parent directory that may have restricted listing rights.
+    $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content -LiteralPath $releaseKey -Raw).Trim()
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
 }
 # Automated release builds must fail on signing errors instead of waiting on an

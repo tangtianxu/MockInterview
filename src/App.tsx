@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -19,6 +19,8 @@ import { MathText } from "./MathText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {useHistoryRecorder} from "./history";
 import {HistoryView} from "./HistoryView";
+import {KnowledgeView} from "./KnowledgeView";
+import {knowledgeForQuestion,readKnowledgeSnapshot,type KnowledgeContext} from "./knowledge";
 import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, providerDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
@@ -26,6 +28,7 @@ import { PracticeView, type Resume, type Analysis, type PracticeConfig } from ".
 import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 import {usePanelLayout} from "./usePanelLayout";
 import {TestGuide} from "./TestGuide";
+import {dragWindow} from './windowDrag';
 
 type Api = ModelApi;
 type SttMode = "local" | "api";
@@ -205,14 +208,6 @@ function modelConnectionError(config: ModelConfig, cause: unknown, listing = fal
   return detail;
 }
 
-// Delegate from the whole title bar so nested text, badges and control gaps drag too.
-function dragWindow(event: MouseEvent<HTMLElement>) {
-  if(event.button!==0 || event.defaultPrevented || (event.target as Element).closest(
-    "button,[role=button],input,select,textarea,a,summary,[contenteditable],[data-no-window-drag]"))return;
-  event.preventDefault();
-  void getCurrentWebviewWindow().startDragging().catch(cause=>console.error("窗口拖动失败",cause));
-}
-
 function ResizeCorners() {
   const corners=(["NorthWest","NorthEast","SouthWest","SouthEast","North","South","East","West"] as const);
   return <>{corners.map(direction=><div key={direction} className={`resize-corner resize-${direction.toLowerCase()}`}
@@ -349,6 +344,13 @@ function Main() {
   const [locked, setLocked] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"display" | "audio" | "profile" | "models" | "updates" | "diagnostics" | "history">("display");
+  const [knowledgeOpen,setKnowledgeOpen]=useState(false);
+  const [knowledgeHistory,setKnowledgeHistory]=useState("");
+  const [knowledgeBusy,setKnowledgeBusy]=useState(false);
+  const [knowledgeEnabled,setKnowledgeEnabled]=useState(false);
+  const knowledgeEnabledRef=useRef(false);knowledgeEnabledRef.current=knowledgeEnabled;
+  const knowledgeAnswerRef=useRef(false);
+  useEffect(()=>{void readKnowledgeSnapshot().then(s=>setKnowledgeEnabled(s.library.enabled)).catch(()=>{});},[]);
   const {recorder:liveHistory,error:historyError}=useHistoryRecorder();
   const [historyNativeError,setHistoryNativeError]=useState("");
   const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
@@ -477,7 +479,7 @@ function Main() {
     }).then(unlisten=>{if(cancelled)unlisten();else stop=unlisten;});
     return()=>{cancelled=true;stop?.();};
   },[]);
-  const updateBlocked=running || practiceActive || practiceWorking || !profileReady ||
+  const updateBlocked=running || practiceActive || practiceWorking || knowledgeBusy || !profileReady ||
     startingService || testingModel!==null || linkingModels || !!download || pulling || deletingModel || managingOllama ||
     status==="deciding" || status==="generating" || detailLoading;
   const updater=useSoftwareUpdate(updateBlocked,flushProfile);
@@ -572,7 +574,7 @@ function Main() {
     if (container && followTranscriptRef.current) container.scrollTop=segments.length || partial || micPartial ? container.scrollHeight : 0;
   }, [segments, partial, micPartial, workspaceMode]);
   useEffect(() => {
-    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:answerSource!=="saved"};
+    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:knowledgeAnswerRef.current?!!detail:answerSource!=="saved"};
     void emit("mvp_ui_state", state);
   }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, answerSource]);
 
@@ -1008,6 +1010,29 @@ function Main() {
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
     liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
+    knowledgeAnswerRef.current=false;
+    let knowledgeContext:KnowledgeContext|undefined;
+    const stillCurrent=()=>answerRequestRef.current===requestId&&!softwareUpdatingRef.current;
+    if(knowledgeEnabledRef.current){
+      setStatus("generating");
+      try{
+        const result=await knowledgeForQuestion(nextQuestion,liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配"),stillCurrent);
+        if(!stillCurrent())return;
+        if(result.missingProject){setError("项目指代不明确，请在“面试准备”的生成与使用设置中指定优先使用的项目，或在问题框写明项目名称。");setStatus("error");return;}
+        if(result.missingEvidence){setError("没有检索到这个项目的可靠资料。请先导入项目资料，或编写并确认该题的标准回答。");setStatus("error");return;}
+        if(result.exact){
+          const startedAt=performance.now();knowledgeAnswerRef.current=true;
+          detailRequestRef.current="";setDetail(result.exact.explanation);setDetailLoading(false);setShowDetail(false);
+          pendingDisplayRef.current=null;pendingHintRef.current="";answerDisplayRef.current=null;
+          questionRef.current=nextQuestion;answerTaskRef.current=JSON.stringify([nextQuestion,focus,keyTerms,constraints,terms]);
+          showAnswerSnapshot({question:nextQuestion,terms,keyTerms,transition,lastShown:"",requestId,startedAt,asrAt,source:"saved"},result.exact.answer);
+          setCompleteMs(0);setTranscriptToCompleteMs(asrAt===null?null:Math.round(performance.now()-asrAt));setApiPending(false);
+          liveHistory.record("answer",result.exact.answer,{question:nextQuestion,source:"knowledge",questionId:result.exact.id,complete:true});
+          setStatus(runningRef.current?"listening":"idle");return;
+        }
+        knowledgeContext=result.context;knowledgeAnswerRef.current=!!knowledgeContext;
+      }catch(cause){if(stillCurrent()){setError(`题库回答未继续：${String(cause)}`);setStatus("error");}return;}
+    }
     const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
     const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
       source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
@@ -1036,12 +1061,14 @@ function Main() {
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
         await invoke("mvp_answer",{endpoint:liveHistory.endpoint(endpoint(config,"answer"),"回答生成"),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
+          knowledgeContext,
           answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
       }catch(cause){if(answerRaceRef.current===race)finishAnswer(id,String(cause));}
     }));
-  }, [cancelAnswer,finishAnswer,logDiagnostic]);
+  }, [cancelAnswer,finishAnswer,logDiagnostic,showAnswerSnapshot]);
 
   const showSelfIntroduction = useCallback((sourceId:string,asrAt:number|null) => {
+    knowledgeAnswerRef.current=false;
     cancelAnswer();savedIntroductionRef.current=true;setError("");
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
     pendingDisplayRef.current=null;pendingHintRef.current="";
@@ -1082,7 +1109,7 @@ function Main() {
   const loadDetail = useCallback(async () => {
     const question=visibleQuestionRef.current;
     const summary=visibleHintRef.current;
-    if (softwareUpdatingRef.current || savedIntroductionRef.current || !question || !summary || detailRequestRef.current ||
+    if (softwareUpdatingRef.current || savedIntroductionRef.current || knowledgeAnswerRef.current || !question || !summary || detailRequestRef.current ||
         (detailRef.current && !detailRef.current.startsWith("原理解释失败："))) return;
     const requestId=crypto.randomUUID();detailRequestRef.current=requestId;
     setDetail("");setDetailLoading(true);
@@ -1136,6 +1163,7 @@ function Main() {
           candidateReply:micPartialRef.current?.text || [...segmentsRef.current].reverse().find(item=>item.speaker==="User")?.text || "",
           visibleQuestion:visibleQuestionRef.current, isFinal:pending.isFinal,
           videoMode:settingsRef.current.mode === "video",
+          projectKnowledge:knowledgeEnabledRef.current,
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
             settingsRef.current.decision.api==="ollama") },
       });
@@ -1299,7 +1327,7 @@ function Main() {
         }
         void emit("mvp_ui_state", {question:visibleQuestionRef.current,hint:visibleHintRef.current,
           status:"listening",locked:lockedRef.current,uncertainTerms:visibleTermsRef.current,
-          keyTerms:visibleKeyTermsRef.current,detail:detailRef.current,detailLoading:detailLoadingRef.current,detailAvailable:!savedIntroductionRef.current});
+          keyTerms:visibleKeyTermsRef.current,detail:detailRef.current,detailLoading:detailLoadingRef.current,detailAvailable:knowledgeAnswerRef.current?!!detailRef.current:!savedIntroductionRef.current});
       }));
     };
     void register();
@@ -1569,6 +1597,7 @@ function Main() {
             onClick={()=>setPracticeFeedbackVisible(value=>!value)}><Sparkles size={17}/> 回答复盘</button>
         </>}
         <button className="ghost-btn" onClick={()=>{setSettingsTab("history");setShowSettings(true);}}><FileText size={17}/> 历史</button>
+        <button className="ghost-btn" disabled={knowledgeBusy||updater.busy} onClick={()=>{setKnowledgeHistory("");setKnowledgeOpen(true);}}><FileText size={17}/> 面试准备</button>
         <button className="ghost-btn" onClick={() => setShowSettings(!showSettings)}><Settings2 size={17}/> 设置</button>
         <button className={settings.launcherOnTop ? "ghost-btn top-active" : "ghost-btn"}
           aria-pressed={settings.launcherOnTop} onClick={() => update({launcherOnTop:!settings.launcherOnTop})}>
@@ -1589,6 +1618,7 @@ function Main() {
     {(historyError || practiceHistoryError || historyNativeError) && <p className="error-box history-save-error" role="alert">{historyError || practiceHistoryError || historyNativeError}</p>}
     {error&&<p className="error-box history-save-error" role="alert">{error}</p>}
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
+      knowledgeEnabled={knowledgeEnabled}
       domain={settings.domain} liveRunning={running} personalization={settings.answerInstructions}
       onSessionActiveChange={setPracticeActive} onWorkActiveChange={setPracticeWorking} updating={updater.busy || deletingModel || managingOllama}
       onPreviewChange={setPracticePreview} history={practiceHistoryRecorder}
@@ -1660,19 +1690,20 @@ function Main() {
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
           <div className="answer-label answer-label-space">{answerSource==="saved" ? "自我介绍稿" : "定义与原理"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
           <div className="answer-card">{hint?<div className="answer-text"><MathText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
-          {hint && answerSource!=="saved" && <button className="detail-btn" onClick={()=>{
+          {hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <button className="detail-btn" onClick={()=>{
             if (!showDetail && (!detail || detail.startsWith("原理解释失败：")) && !detailLoading) void loadDetail();
             setShowDetail(!showDetail);
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
-          {showDetail && hint && answerSource!=="saved" && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
+          {showDetail && hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           </div>
-        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? "已保存的自我介绍" : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
+        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? (knowledgeAnswerRef.current?"题库标准回答":"已保存的自我介绍") : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
       </section>
       {panelLayout.dividers}
     </main>}
-    {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}><aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
-      <div className="drawer-head" onMouseDown={dragWindow}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志",history:"历史会话"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
+    {showSettings && <div className="settings-scrim" onClick={()=>setShowSettings(false)}>
+      <div className="drawer-head settings-titlebar" onMouseDown={dragWindow} onClick={event=>event.stopPropagation()}><div><span className="panel-kicker">偏好设置</span><h2>{({display:"界面与隐私",audio:"音频设备",profile:"个人资料",models:"模型与服务",updates:"软件更新",diagnostics:"诊断日志",history:"历史会话"} as const)[settingsTab]}</h2></div><button className="icon-btn" aria-label="关闭设置" onClick={()=>setShowSettings(false)}><X size={20}/></button></div>
+      <aside className="settings-drawer" onClick={event=>event.stopPropagation()}>
       <nav className="settings-tabs" role="tablist" aria-label="设置分类">
         {([ ["display","界面与隐私",Sun], ["audio","音频设备",Headphones], ["profile","个人资料",FileText], ["models","模型与服务",Sparkles], ["updates","软件更新",RefreshCw], ["diagnostics","诊断日志",Activity], ["history","历史会话",FileText] ] as const).map(([tab,label,Icon])=><button
           key={tab} role="tab" aria-selected={settingsTab===tab} className={settingsTab===tab?"settings-tab selected":"settings-tab"}
@@ -1899,7 +1930,7 @@ function Main() {
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
         </div>}
         {settingsTab === "updates" && <SoftwareUpdate version={version} blocked={updateBlocked} updater={updater}/>}
-        {settingsTab === "history" && <HistoryView activeIds={[liveHistory.sessionId,practiceHistoryRecorder.sessionId]}/>}
+        {settingsTab === "history" && <HistoryView activeIds={[liveHistory.sessionId,practiceHistoryRecorder.sessionId]} onExportQuestions={id=>{setKnowledgeHistory(id);setShowSettings(false);setKnowledgeOpen(true);}}/>}
         {settingsTab === "diagnostics" &&
         <div className="setting-group"><div className="setting-heading"><Activity size={18}/> 诊断日志</div>
           <p className="setting-help">仅保存在本机，最多保留最近 80 条状态与耗时；不记录音频、转录内容或 API 密钥。</p>
@@ -1914,6 +1945,7 @@ function Main() {
         </div>}
       </fieldset></div><div className="drawer-foot"><button className="start-btn wide" onClick={()=>setShowSettings(false)}>完成设置</button></div>
     </aside></div>}
+    {knowledgeOpen&&<KnowledgeView model={endpoint(settings.answer,"answer")} historyId={knowledgeHistory} onClose={()=>setKnowledgeOpen(false)} onChange={setKnowledgeEnabled} onBusyChange={setKnowledgeBusy}/>}
     <ResizeCorners/>
   </div>;
 }

@@ -245,7 +245,7 @@ fn english_terms(value:&str)->HashSet<String> {
         .filter(|part|!FILLER.contains(&part.as_str())).collect()
 }
 
-fn retrieval_score(question:&str,text:&str)->f64 {
+pub(crate) fn retrieval_score(question:&str,text:&str)->f64 {
     let latin=question.chars().filter(|ch|ch.is_ascii_alphabetic()).count();
     let han=question.chars().filter(|ch|('\u{3400}'..='\u{9fff}').contains(ch)).count();
     if latin>=5 && latin>han*2 {

@@ -1,0 +1,6 @@
+.preparation-file-help{padding:14px 18px;border:1px solid var(--line,#36544c);border-radius:12px;background:var(--card,#17312d);min-width:0}
+.preparation-file-help summary{font-size:14px;line-height:1.7}
+.preparation-file-help p{line-height:1.8}
+.preparation-file-help .preparation-tree{white-space:pre-wrap;overflow-wrap:anywhere}
+.preparation-start p{margin:10px 0 0}
+.preparation-actions .knowledge-agent-prompt{width:100%;min-width:0}

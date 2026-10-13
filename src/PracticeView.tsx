@@ -9,6 +9,7 @@ import type {HistoryRecorder} from "./history";
 import {SetupGuide,type GuideSetup} from "./SetupGuide";
 import {usePanelLayout} from "./usePanelLayout";
 import {practiceHistory,repeatedPracticeQuestion,PracticeRequestGate,practiceBackground,type PracticeBackground} from "./practiceSession";
+import {knowledgeForQuestion,readKnowledgeSnapshot,type BankQuestion,type KnowledgeContext} from "./knowledge";
 
 type ModelEndpoint = { api: string; baseUrl: string; model: string; credentialSlot: string };
 type SttSettings = { mode: "local" | "api"; engine: string; model: string; apiProvider: string;
@@ -18,7 +19,7 @@ export type PracticeConfig = { minutes: number; scope: "technical" | "project" |
 export type Resume = { name: string; text: string; truncated: boolean; hash: string };
 export type Analysis = { summary: string; skills?: string[]; projects?: string[];
   uncertainties?: string[]; suggestedTopics?: string[] };
-type Question = { question: string; topic?: string; intent?: string; background?:PracticeBackground };
+type Question = { question: string; topic?: string; intent?: string; background?:PracticeBackground;bankQuestion?:BankQuestion };
 type Feedback = { score:number;evidence:string;questionKind?:string;missing?:string[];
   corrections?:{quote:string;explanation:string;correct:string}[];missingPoints?:{point:string;explanation:string}[] };
 type Turn = { id:string;question:string;answer:string;feedback:Feedback;reference?:string };
@@ -41,17 +42,18 @@ function minutesLabel(seconds: number) {
 
 export function PracticeView({model, domain, liveRunning, stt, personalization, onSessionActiveChange,
   resume, analysis, onResumeImported, onAnalysis, onClearResume, role, topics, onRoleChange, onTopicsChange,
-  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings,history,guideSetup}: {model: ModelEndpoint; domain: string;
+  setupVisible=true,feedbackVisible=true,resumePath="",resumeError="",onPreviewChange,onConfigChange,profileEpoch=0,onWorkActiveChange,updating=false,onModelSettings,history,guideSetup,knowledgeEnabled=false}: {model: ModelEndpoint; domain: string;
   liveRunning: boolean; stt: SttSettings; personalization?: string; onSessionActiveChange?: (active:boolean)=>void;
   resume: Resume|null; analysis: Analysis|null; onResumeImported:(path:string,resume:Resume)=>void;
   onAnalysis:(analysis:Analysis)=>void; onClearResume:()=>void; role:string; topics:string;
   onRoleChange:(value:string)=>void; onTopicsChange:(value:string)=>void;
   setupVisible?:boolean; feedbackVisible?:boolean; resumePath?:string; resumeError?:string;
   onPreviewChange?:(preview:{question:string;hint:string})=>void;
-  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void;history:HistoryRecorder;guideSetup:GuideSetup}) {
+  onConfigChange?:()=>void;profileEpoch?:number;updating?:boolean;onWorkActiveChange?:(busy:boolean)=>void;onModelSettings?:()=>void;history:HistoryRecorder;guideSetup:GuideSetup;knowledgeEnabled?:boolean}) {
   const [guideVisible,setGuideVisible]=useState(()=>localStorage.getItem("mockInterview.setupGuideSeen")!=="1");
   const dismissGuide=()=>{localStorage.setItem("mockInterview.setupGuideSeen","1");setGuideVisible(false);};
   const [config, setConfig] = useState<PracticeConfig>(loadConfig);
+  const [useBank,setUseBank]=useState(false);
   const [question, setQuestion] = useState<Question | null>(null);
   const [draft, setDraft] = useState("");
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -110,7 +112,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const epoch=sessionEpochRef.current;
     if (local) await invoke("start_local_service",{service:"ollama"});
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
-    const consentToSendResume=action==="analyze" ? await authorizeBackground({...background,resumeText:String(fields.resumeText || ""),resumeAnalysis:""},"简历分析") : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
+    const consentToSendResume=fields.knowledgeContext ? false : action==="analyze" ? await authorizeBackground({...background,resumeText:String(fields.resumeText || ""),resumeAnalysis:""},"简历分析") : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     return invoke<Record<string,unknown>>("practice_model",{endpoint:history.endpoint(model,action==="ask"?"练习出题":action==="evaluate"?"练习评价":"简历分析"),input:{
       ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
@@ -151,8 +153,16 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const stillCurrent=()=>referenceRequestRef.current===current && sessionEpochRef.current===epoch;
     setReference({text:"",loading:true,error:""});
     try {
+      if(currentQuestion.bankQuestion){
+        const snapshot=await readKnowledgeSnapshot();
+        const bank=snapshot.questions.find(q=>q.id===currentQuestion.bankQuestion?.id&&q.status==="confirmed"&&q.answer===currentQuestion.bankQuestion?.answer);
+        if(!bank)throw Error("题库答案或资料已变更，请核对后再练习。");
+        if(stillCurrent()){current.text=[bank.answer,bank.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge",questionId:bank.id},current.id);}return;
+      }
       const background=currentQuestion.background || currentBackground();
-      const consentToSendResume=await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
+      let knowledgeContext:KnowledgeContext|undefined;
+      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,model,stillCurrent);if(!stillCurrent())return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
+      const consentToSendResume=knowledgeContext ? false : await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
       if(!stillCurrent())return;
       if(local)await invoke("start_local_service",{service:"ollama"});
       if(!stillCurrent())return;
@@ -170,7 +180,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       referenceStopsRef.current.push(stop);
       await invoke("mvp_answer",{endpoint:history.endpoint(model,"参考生成"),requestId:current.id,question:currentQuestion.question,
         focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
-        practiceContext:{...background,preferences:local ? background.preferences : "",consentToSendResume}});
+        knowledgeContext,practiceContext:{...background,resumeText:knowledgeContext?"":background.resumeText,resumeAnalysis:knowledgeContext?"":background.resumeAnalysis,preferences:local ? background.preferences : "",consentToSendResume}});
       if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
       if(stillCurrent())history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:local?"local":"api"},current.id);
     }catch(cause){if(stillCurrent()){
@@ -202,6 +212,15 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     try {
       const recentHistory=practiceHistory(previous);
       const background=currentBackground();
+      if(useBank){
+        const snapshot=await readKnowledgeSnapshot();
+        if(!operationRef.current.current(token))return false;
+        const available=snapshot.questions.filter(q=>q.status==="confirmed"&&(!snapshot.library.activeProject||!q.project||q.project===snapshot.library.activeProject)&&
+          (config.scope==="technical"?q.category==="技术基础":config.scope==="project"?q.category==="项目问题":true)&&!repeatedPracticeQuestion(q.question,recentHistory.askedQuestions));
+        const selected=available[0];if(!selected)throw Error("匹配的已确认题目已问完，或当前项目/范围尚无题目。请补充题库、扩大范围或结束本轮。");
+        setQuestion({question:selected.question,topic:[selected.project,...selected.tags].filter(Boolean).join(" · "),intent:selected.category==="技术基础"?"technical":"project",bankQuestion:selected,
+          background:{...background,resumeText:"",resumeAnalysis:""}});setFeedback(null);setDraft("");history.record("question",selected.question,{questionId:selected.id,source:"knowledge"});return true;
+      }
       const value = await request("ask",recentHistory,background) as Question;
       if(!operationRef.current.current(token))return false;
       if(!value.question?.trim() || repeatedPracticeQuestion(value.question,recentHistory.askedQuestions))
@@ -216,7 +235,8 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if(updating)return;
     if(operationRef.current.busy || micStartingRef.current)return;
     if (liveRunning) {setError("请先结束实时聆听，再开始模拟练习。");return;}
-    if (config.scope !== "technical" && !analysis) {setError("项目、混合或综合练习需要先导入并分析简历。");return;}
+    if(useBank&&!knowledgeEnabled){setError("请在“面试准备 → 已采用”开启“练习时使用这些问答”。");return;}
+    if (config.scope !== "technical" && !analysis && !useBank) {setError("项目、混合或综合练习需要分析简历，或选择已确认题库练习。");return;}
     const epoch=++sessionEpochRef.current;cancelReference();turnsRef.current=[];
     history.begin("practice",`模拟练习${role?` · ${role}`:""}${topics?` · ${topics}`:""}`);
     setTurns([]);setQuestion(null);setFeedback(null);setRemaining(config.minutes*60);
@@ -236,7 +256,9 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if (micOnRef.current) await stopMic();
     setBusy("feedback");setError("");
     try {
-      const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer},currentQuestion.background);
+      let knowledgeContext:KnowledgeContext|undefined;
+      if(currentQuestion.bankQuestion){const agreed=local||await confirmSend(`本次评价将发送当前问题、你的作答与该题的已确认标准回答，发送至 ${model.baseUrl}，模型 ${model.model}；不发送简历全文或其他资料。仅本次授权，是否继续？`,{title:"确认本次题库评价发送",kind:"warning"});if(!agreed)throw Error("已取消评价");knowledgeContext={questions:[currentQuestion.bankQuestion],passages:[],consent:true};}
+      const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer,knowledgeContext},currentQuestion.background);
       if(!operationRef.current.current(token))return;
       const result = value as Feedback;
       setFeedback(result);
@@ -245,7 +267,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       turnsRef.current=next;setTurns(next);
       // Knowledge questions automatically receive an independent reference answer.
       // Project-related questions require an explicit action/consent for the extra call.
-      if(result.questionKind==="technical")void generateReference(currentQuestion,turnId,epoch);
+      if(result.questionKind==="technical"||currentQuestion.bankQuestion)void generateReference(currentQuestion,turnId,epoch);
     } catch (cause) {if(operationRef.current.current(token))setError(`生成反馈失败：${String(cause)}`);}
     finally {if(operationRef.current.finish(token))setBusy(null);}
   };
@@ -322,6 +344,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         <button className="practice-secondary" disabled={active || !!busy || micStarting || updating} onClick={()=>setGuideVisible(value=>!value)}>使用指南</button></div>
       <div className="practice-options">
         <h2>练习设置</h2>
+        {knowledgeEnabled&&<label><input type="checkbox" checked={useBank} disabled={active||!!busy||updating} onChange={e=>setUseBank(e.target.checked)}/>使用已采用问答出题（无需先分析简历）</label>}
         <label>时长<select value={config.minutes} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,minutes:Number(event.target.value)}))}>
           {[10,20,30,45,60].map(value=><option key={value} value={value}>{value} 分钟</option>)}</select></label>
         <label>覆盖范围<select value={config.scope} disabled={active || !!busy || micStarting || updating} onChange={event=>setConfig(value=>({...value,scope:event.target.value as PracticeConfig["scope"]}))}>
@@ -361,7 +384,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           <div className="practice-bubble interviewer"><small>面试官 · 第 {index+1} 题</small><p><MathText text={turn.question}/></p></div>
           <div className="practice-bubble candidate"><small>我的回答</small><p><MathText text={turn.answer}/></p></div>
           <div className="practice-mini-score">参考评分 {turn.feedback.score}/5 · 回答依据：“{turn.feedback.evidence}”</div>
-          {turn.reference && <details className="practice-history-reference"><summary>{turn.feedback.questionKind==="technical" ? "查看参考答案" : "查看回答思路"}</summary><p><MathText text={turn.reference}/></p></details>}
+          {turn.reference && <details className="practice-history-reference"><summary>{(turn.feedback.questionKind==="technical"||turn.feedback.corrections!==undefined||turn.feedback.missingPoints!==undefined) ? "查看参考答案" : "查看回答思路"}</summary><p><MathText text={turn.reference}/></p></details>}
         </div>)}
         {question && !feedback && <div className="practice-bubble interviewer current"><small>面试官 · 当前问题</small><p><MathText text={question.question}/></p><span>{question.topic}</span></div>}
         {!question && !busy && !guideVisible && <div className="practice-empty"><AudioLines size={31}/><h3>准备开始模拟面试</h3><p>设置范围、难度和时长后，模型会逐题提问。</p></div>}
@@ -382,7 +405,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       {feedback ? <div className="practice-feedback-body">
         <div className="practice-score">{feedback.score}<span>/ 5</span></div>
         <h3>本次回答片段</h3><p>“{feedback.evidence}”</p>
-        {feedback.questionKind==="technical" ? <>
+        {(feedback.questionKind==="technical"||feedback.corrections!==undefined||feedback.missingPoints!==undefined) ? <>
           {!!feedback.corrections?.length && <><h3>需要纠正</h3>{feedback.corrections.map((item,index)=><div className="practice-knowledge-point" key={index}>
             <blockquote>“{item.quote}”</blockquote><p><MathText text={item.explanation}/></p><p className="practice-correct"><MathText text={`正确理解：${item.correct}`}/></p></div>)}</>}
           {!!feedback.missingPoints?.length && <><h3>本题漏答的知识点</h3>{feedback.missingPoints.map((item,index)=><div className="practice-knowledge-point" key={index}>
@@ -391,15 +414,15 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
         </> : <>
           {!!feedback.missing?.length && <><h3>对照本题检查</h3><ul>{feedback.missing.map((item,index)=><li key={index}>{aspects[item]}</li>)}</ul></>}
         </>}
-        <div className="practice-reference-answer"><h3>{feedback.questionKind==="technical" ? "参考答案" : "回答思路"}</h3>
+        <div className="practice-reference-answer"><h3>{(feedback.questionKind==="technical"||feedback.corrections!==undefined||feedback.missingPoints!==undefined) ? "参考答案" : "回答思路"}</h3>
           {reference.text && <p><MathText text={reference.text}/></p>}
           {reference.loading && <p role="status">{reference.text ? "正在继续生成…" : "回答模型正在生成参考内容…"}</p>}
           {reference.error && <p className="practice-reference-error" role="alert">{reference.error}</p>}
           {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={updating || !!busy}
             onClick={()=>{const turn=turnsRef.current.slice(-1)[0];if(question && turn)void generateReference(question,turn.id);}}>
-            {reference.error ? "重新生成" : feedback.questionKind==="technical" ? "生成参考答案" : "生成参考思路"}</button>}
+            {reference.error ? "重新生成" : (feedback.questionKind==="technical"||feedback.corrections!==undefined||feedback.missingPoints!==undefined) ? "生成参考答案" : "生成参考思路"}</button>}
         </div>
-        <p className="practice-feedback-note">参考内容由当前回答模型生成，技术事实与评分仍需核对。项目题只给组织思路，不编造本人做过的机制、职责或成果。</p>
+        <p className="practice-feedback-note">{question?.bankQuestion ? "参考答案使用本人确认的题库版本；本次评分与反馈由模型生成，仍需核对。" : "参考内容由当前回答模型生成，技术事实与评分仍需核对。项目题只给组织思路，不编造本人做过的机制、职责或成果。"}</p>
         <button className="start-btn" disabled={!active || !!busy || reference.loading} onClick={()=>void ask()}>下一题</button>
       </div> : <div className="practice-feedback-empty"><Sparkles size={30}/><h3>提交回答后查看反馈</h3><p>评分用于练习，不等同于真实面试评价。</p></div>}
     </section>
