@@ -2,7 +2,7 @@ import {useEffect,useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
 import {ask,save} from "./inAppActions";
 import {MathText} from "./MathText";
-import {CodeAnswer} from "./ScreenCode";
+import {AnswerText} from "./AnswerText";
 import type {HistorySession,HistoryRecord} from "./history";
 const labels:Record<string,string>={transcript:"转录",question:"问题",answer:"模型回答",feedback:"评分与复盘",detail:"补充解释",usage:"模型用量",decision:"问题识别依据",retrieval:"题库检索依据"};
 export function HistoryView({activeIds,onExportQuestions}:{activeIds:(string|null)[];onExportQuestions?:(id:string)=>void}){
@@ -30,7 +30,7 @@ export function HistoryView({activeIds,onExportQuestions}:{activeIds:(string|nul
    {!!stats.size&&<><h4>按阶段统计模型用量</h4><div className="history-table"><table><thead><tr><th>阶段</th><th>返回请求</th><th>输入 token</th><th>缓存命中</th><th>输出 token</th></tr></thead><tbody>{[...stats].map(([stage,v])=><tr key={stage}><td>{stage}</td><td>{v.requests}（{v.known} 条含用量）</td><td>{v.input}</td><td>{v.cached}</td><td>{v.output}</td></tr>)}</tbody></table></div><p className="setting-help">只累计接口实际返回的用量；未返回、失败或取消的请求可能仍被服务商计费，缺失用量不代表零费用。缓存命中包含在输入 token 内，不重复相加。最终账单以平台为准。</p></>}
    <label><input type="checkbox" checked={showDiagnostics} onChange={e=>setShowDiagnostics(e.target.checked)}/> 显示问题识别和题库检索依据</label>
    {selected.entries.filter(e=>e.kind!=="usage"&&(showDiagnostics||e.kind!=="decision"&&e.kind!=="retrieval")).map(entry=><article className="history-entry" key={entry.id}><small>{labels[entry.kind]||entry.kind} · {new Date(entry.at).toLocaleTimeString("zh-CN")}{entry.data.speaker?` · ${entry.data.speaker==="User"?"我的作答":"面试音频"}`:""}{entry.data.complete===false?" · 未完成":""}</small>
-    {entry.data.question&&<h4>{entry.data.question}</h4>}{entry.data.coding?<CodeAnswer text={entry.text}/>:<MathText text={entry.text}/>}{(entry.kind==="decision"||entry.kind==="retrieval")&&<details><summary>查看处理依据</summary><pre>{JSON.stringify(entry.data,null,2)}</pre></details>}{entry.kind==="feedback"&&<>
+    {entry.data.question&&<h4>{entry.data.question}</h4>}<AnswerText text={entry.text}/>{(entry.kind==="decision"||entry.kind==="retrieval")&&<details><summary>查看处理依据</summary><pre>{JSON.stringify(entry.data,null,2)}</pre></details>}{entry.kind==="feedback"&&<>
       <p>回答依据：{entry.data.feedback?.evidence}</p>
       {(entry.data.feedback?.corrections||[]).map((item:any,index:number)=><p key={`c-${index}`}><MathText text={`需纠正：${item.quote}\n${item.explanation}\n正确理解：${item.correct}`}/></p>)}
       {(entry.data.feedback?.missingPoints||[]).map((item:any,index:number)=><p key={`m-${index}`}><MathText text={`漏答：${item.point}\n${item.explanation}`}/></p>)}

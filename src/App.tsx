@@ -16,6 +16,7 @@ import { taskWindow,dialogueContext } from "./dialogueContext";
 import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
+import {AnswerText} from "./AnswerText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {InAppActions} from "./ActionPanel";
 import {useHistoryRecorder} from "./history";
@@ -30,7 +31,7 @@ import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 import {usePanelLayout} from "./usePanelLayout";
 import {TestGuide} from "./TestGuide";
 import {dragWindow} from './windowDrag';
-import {useScreenCode,ScreenCodePanel,ScreenShortcutEditor,CodeAnswer,DEFAULT_SCREEN_SHORTCUT,CODE_LANGUAGES} from './ScreenCode';
+import {useScreenCode,ScreenCodePanel,ScreenShortcutEditor,DEFAULT_SCREEN_SHORTCUT,CODE_LANGUAGES} from './ScreenCode';
 
 type Api = ModelApi;
 type SttMode = "local" | "api";
@@ -254,7 +255,7 @@ function Overlay() {
       <div className="floating-question"><MathText text={practice ? (practice.question || "等待练习问题…") : (state.question || "等待面试官提出问题…")}/></div>
       {!practice && state.keyTerms.length > 0 && <div className="term-list">{state.keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
       {!practice && state.uncertainTerms.length > 0 && <div className="term-warning">术语待确认：{state.uncertainTerms.join("、")}</div>}
-      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <MathText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? (state.coding?<CodeAnswer text={state.hint}/>:<MathText text={state.hint}/>) : <span className="placeholder">答案要点会出现在这里</span>)}</div>
+      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <AnswerText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? <AnswerText text={state.hint}/> : <span className="placeholder">答案要点会出现在这里</span>)}</div>
       {!practice && state.hint && state.detailAvailable!==false && <button className="floating-expand" onClick={()=>{
         if (!expanded && (!state.detail || state.detail.startsWith("原理解释失败：")) && !state.detailLoading)
           void emit("mvp_detail_request");
@@ -359,7 +360,6 @@ function Main() {
   useEffect(()=>{void readKnowledgeSnapshot().then(s=>setKnowledgeEnabled(s.library.enabled)).catch(cause=>setError(`面试准备状态读取失败：${String(cause)}`));},[]);
   const {recorder:liveHistory,error:historyError}=useHistoryRecorder();
   const [historyNativeError,setHistoryNativeError]=useState("");
-  const [actionNotice,setActionNotice]=useState("");
   const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
   const [showDetail, setShowDetail] = useState(false);
   const [download, setDownload] = useState("");
@@ -1023,7 +1023,6 @@ function Main() {
     if(softwareUpdatingRef.current || modelRemovalRef.current)return;
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
-    setActionNotice("");
     const settings=settingsRef.current;
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
@@ -1041,7 +1040,6 @@ function Main() {
       try{
         const result=await knowledgeForQuestion(nextQuestion,await liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配",stillCurrent),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
         if(!stillCurrent())return;
-        if(result.cancelled){answerRequestRef.current="";setError("");setActionNotice("已跳过本次题库匹配，相关内容未发送。");setStatus(runningRef.current?"listening":"idle");return;}
         if(result.missingProject){setError("项目指代不明确，请在“面试准备”的生成与使用设置中指定优先使用的项目，或在问题框写明项目名称。");setStatus("error");return;}
         if(result.missingEvidence){setError("没有检索到这个项目的可靠资料。请先导入项目资料，或编写并确认该题的标准回答。");setStatus("error");return;}
         if(result.exact){
@@ -1629,7 +1627,6 @@ function Main() {
         </div>
     </header>
     <InAppActions/>
-    {actionNotice&&<p className="inline-operation-note" role="status">{actionNotice}<button aria-label="收起操作提示" onClick={()=>setActionNotice("")}>×</button></p>}
     {(historyError || practiceHistoryError || historyNativeError) && <p className="error-box history-save-error" role="alert">{historyError || practiceHistoryError || historyNativeError}</p>}
     {error&&<p className="error-box history-save-error" role="alert">{error}</p>}
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}
@@ -1692,7 +1689,7 @@ function Main() {
         {answerView==="screen"?<ScreenCodePanel solver={screen} language={settings.screenCodeLanguage} onLanguage={value=>update({screenCodeLanguage:value})} shortcut={settings.screenShortcut}/>:<>
         <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div></div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
-              value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
+              value={questionDraft} maxLength={12000} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
               onKeyDown={event=>{
                 if (event.key==="Escape") {event.preventDefault();setEditingQuestion(false);}
                 else if (event.key==="Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode!==229) {
@@ -1705,8 +1702,8 @@ function Main() {
               onClick={()=>{setQuestionDraft(question);setEditingQuestion(true);}}><MathText text={question || "点击输入问题，或等待转录识别…"}/></button>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
-          <div className="answer-label answer-label-space">{answerSource==="saved" ? "自我介绍稿" : "定义与原理"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
-          <div className="answer-card">{hint?<div className="answer-text"><MathText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
+          <div className="answer-label answer-label-space">{answerSource==="saved" ? (knowledgeAnswerRef.current?"题库回答":"自我介绍稿") : /(^|\n) {0,3}(`{3,}|~{3,})/.test(hint)?"代码与说明":"定义与原理"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
+          <div className="answer-card">{hint?<div className="answer-text"><AnswerText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
           {hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <button className="detail-btn" onClick={()=>{
             if (!showDetail && (!detail || detail.startsWith("原理解释失败：")) && !detailLoading) void loadDetail();
             setShowDetail(!showDetail);
@@ -1774,6 +1771,7 @@ function Main() {
           <p className="setting-help">{settings.mode==="offline" ? "线下面试只采集所选麦克风，沿用语音识别、问题理解和回答模型。所有麦克风发言均进入提问通道，不区分说话人；背景与追问使用已有对话上下文，说话时不会锁住提示。语音 API 会接收麦克风声音，判别 API 会接收相关转录文本。完成设置后点击开始聆听即可测试。" : "麦克风与系统音频使用所选识别服务，分别标记角色。你的回答仅提供上下文，面试官的发言触发判别。双路会增加本机资源或 API 用量；语音 API 会收到麦克风声音，判别 API 会收到相关对话文本。视频测试沿用视频单音轨。"}</p></div>
         </>}
         {settingsTab === "profile" && <>
+        <p className="setting-help">练习出题、评价和参考答案会自动使用已填写的背景及简历摘录，API 方案会发送到当前模型服务；手动简历分析仍先展示发送范围。</p>
         <div className="setting-group"><div className="setting-heading"><FileText size={18}/> 面试背景</div>
           <label>目标岗位（可选）<input value={settings.targetRole} maxLength={120} disabled={running || practiceActive || practiceWorking || startingService}
             placeholder="如：算法工程师" onChange={event=>update({targetRole:event.target.value})}/></label>

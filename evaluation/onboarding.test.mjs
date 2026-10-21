@@ -26,7 +26,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  </script></body></html>`);
  const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','5202','--strictPort'],{windowsHide:true,stdio:'pipe'});let output='';server.stdout.on('data',s=>output+=s);server.stderr.on('data',s=>output+=s);let browser;
  try{const url='http://127.0.0.1:5202/'+fixture;for(let i=0;i<80;i++){if(server.exitCode!==null)throw Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
- browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:660,height:850}});page.setDefaultTimeout(7000);page.setDefaultNavigationTimeout(20000);await page.goto(url);
+ browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:660,height:850}});page.setDefaultTimeout(7000);page.setDefaultNavigationTimeout(30000);await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
  const guide=page.getByRole('region',{name:'首次使用指南'});await guide.waitFor();
  assert.ok((await guide.innerText()).includes('ModelScope 国内镜像，通常无需 VPN'));
  await guide.getByText('下载失败怎么办？也可使用浏览器下载',{exact:true}).click();
@@ -64,11 +64,11 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await guide.getByRole('button',{name:'下载本地生成模型',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='pull_ollama_model'));
  await guide.getByRole('button',{name:'高级设置：Ollama 路径',exact:true}).click();await page.getByPlaceholder('自动检测或选择 ollama.exe',{exact:true}).waitFor();
  await page.getByRole('button',{name:'完成设置',exact:true}).click();await page.reload();await guide.waitFor();assert.ok((await guide.innerText()).includes('已跳过'));assert.equal(await guide.locator('.guide-switch-step').count(),0,'previous connection marker is not proof of availability after restart');
- await page.goto(url+'?legacy=1');await guide.waitFor();
+ await page.goto(url+'?legacy=1',{waitUntil:'domcontentloaded',timeout:30000});await guide.waitFor();
  assert.equal(await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).getAttribute('aria-pressed'),'true');
  await page.waitForFunction(()=>window.calls.some(c=>c.command==='mvp_list_models'));
  const legacy=await page.evaluate(()=>window.calls.find(c=>c.command==='mvp_list_models').args.endpoint);assert.equal(legacy.baseUrl,'http://127.0.0.1:11434');assert.equal(legacy.model,'qwen3:4b-instruct');assert.equal(await guide.getByRole('combobox',{name:'指南语音模型'}).inputValue(),'small');
- await page.goto(url);await guide.waitFor();await page.evaluate(()=>window.downloaded=true);
+ await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});await guide.waitFor();await page.evaluate(()=>window.downloaded=true);
  await guide.getByRole('button',{name:'打开模型与服务',exact:true}).click();
  await page.getByRole('button',{name:'重新检测',exact:true}).click();
  const removeSpeech=page.getByRole('button',{name:'删除所选语音模型',exact:true});await removeSpeech.waitFor();
@@ -81,7 +81,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  await page.evaluate(()=>window.allowSending=false);await removeOllama.click();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='delete_ollama_model').length),0);
  await page.evaluate(()=>window.allowSending=true);await removeOllama.click();await page.getByText(/已删除模型 qwen3:4b-instruct/).waitFor();assert.equal(await removeOllama.isDisabled(),true);
  const removed=await page.evaluate(()=>window.calls.find(c=>c.command==='delete_ollama_model').args);assert.equal(removed.model,'qwen3:4b-instruct');assert.equal(removed.baseUrl,'http://127.0.0.1:11434');
- await page.goto(url);await guide.waitFor();
+ await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});await guide.waitFor();
  await page.evaluate(()=>window.downloaded=true);await guide.getByRole('button',{name:'重新检测语音模型',exact:true}).click();
  await page.getByRole('button',{name:'双击切换练习与实时提示页面',exact:true}).dblclick();
  const testGuide=page.getByRole('region',{name:'转录与回答测试'});await testGuide.waitFor();

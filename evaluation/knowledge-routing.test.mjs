@@ -2,14 +2,12 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mockIPC} from '@tauri-apps/api/mocks';
 import {emptyQuestion,knowledgeForQuestion} from '../src/knowledge.ts';
-import {subscribeActions,currentAction,finishAction} from '../src/inAppActions.ts';
+import {currentAction} from '../src/inAppActions.ts';
 globalThis.window={};
 const endpoint={api:'deepseek',baseUrl:'https://api.deepseek.com',model:'fixture',historySessionId:'session'};
 const a={...emptyQuestion('A'),id:'a',question:'项目A架构',answer:'A的回答',status:'confirmed'};
 const b={...emptyQuestion('B'),id:'b',question:'项目B职责',answer:'B的回答',status:'confirmed'};
-let unsubscribe=()=>{};
-function fixture({relation='same',consent=true,stale=false,disabled=false,needsPersonalEvidence,empty=false}={}){
- unsubscribe();unsubscribe=subscribeActions(()=>{const action=currentAction();if(action)queueMicrotask(()=>finishAction(action.id,consent));});
+function fixture({relation='same',stale=false,disabled=false,needsPersonalEvidence,empty=false}={}){
  const calls=[];mockIPC(async(command,args)=>{calls.push({command,args});
   if(command==='knowledge_lookup')return {enabled:!disabled,exact:null,questions:empty?[]:[a,b],passages:[],projects:['A','B'],ambiguous:false};
   if(command==='knowledge_prepare')return {token:'once',characters:200,destination:endpoint.baseUrl,model:'fixture'};
@@ -26,13 +24,13 @@ test('multiple candidate projects reach semantic match and the fresh selected an
 test('semantic ambiguity is surfaced after the model, not before it',async()=>{
  const calls=fixture({relation:'ambiguous'});assert.deepEqual(await knowledgeForQuestion('介绍你的项目',endpoint,()=>true),{missingProject:true});assert.ok(calls.some(c=>c.command==='knowledge_run'));
 });
-test('related tasks only pass selected project evidence and require a separate content consent',async()=>{
+test('related tasks automatically pass only selected project evidence without confirmation',async()=>{
  const calls=fixture({relation:'related'});const result=await knowledgeForQuestion('你在B独立完成哪些部分',endpoint,()=>true);
  assert.deepEqual(result.context.questions.map(q=>q.id),['b']);assert.equal(result.exact,undefined);assert.equal(result.context.consent,true);
  assert.equal(calls.filter(c=>c.command.startsWith('plugin:dialog')).length,0);
 });
-test('declining sends no model request and changed answers cannot be reused',async()=>{
- let calls=fixture({consent:false});assert.deepEqual(await knowledgeForQuestion('项目职责',endpoint,()=>true),{cancelled:true});assert.equal(calls.filter(c=>c.command==='knowledge_run').length,0);assert.ok(calls.some(c=>c.command==='knowledge_discard_plan'));
+test('runtime matching is automatic and changed answers cannot be reused',async()=>{
+ const calls=fixture();await knowledgeForQuestion('项目职责',endpoint,()=>true);assert.equal(currentAction(),null);assert.equal(calls.filter(c=>c.command==='knowledge_run').length,1);assert.equal(calls.find(c=>c.command==='knowledge_run').args.consent,true);
  fixture({stale:true});await assert.rejects(knowledgeForQuestion('项目职责',endpoint,()=>true),/已更新/);
 });
 test('disabled or cancelled retrieval never schedules an API call',async()=>{

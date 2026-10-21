@@ -36,7 +36,8 @@ pub fn safe_resume_analysis(value:&Value) -> Result<Value,String> {
 }
 
 // One bounded background is reused for asking, evaluation and reference answers.
-// Consent belongs to each request; it is never inherited from a previous call.
+// Runtime requests authorize the enabled automatic workflow. Manual analysis
+// still obtains approval before sending the selected resume.
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PracticeContext {

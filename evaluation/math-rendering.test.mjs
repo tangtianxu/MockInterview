@@ -10,7 +10,7 @@ test("shared formula display handles streaming, failures and narrow windows",{ti
   await writeFile(fixture,`<!doctype html><html lang="zh"><head><meta charset="UTF-8"></head><body>
     <div id="root"></div><script type="module">
     import React from 'react';import {createRoot} from 'react-dom/client';
-    import {MathText} from '/src/MathText.tsx';import '/src/index.css';import '/src/practice.css';
+    import {AnswerText as MathText} from '/src/AnswerText.tsx';import '/src/index.css';import '/src/practice.css';
     function Fixture(){const [text,setText]=React.useState('准备检查公式显示');window.updateMath=setText;React.useLayoutEffect(()=>{window.currentMath=text},[text]);
       return React.createElement('div',{style:{padding:20,display:'grid',gap:20}},
         React.createElement('div',{className:'answer-card theme-dark',style:{width:540,padding:24}},

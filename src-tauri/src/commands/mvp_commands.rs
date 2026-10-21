@@ -210,7 +210,7 @@ pub fn mvp_cancel_answer(request_id: String) {
 fn answer_system(base: &str, instructions: Option<&str>) -> String {
     let custom = instructions.unwrap_or_default().trim();
     if custom.is_empty() { return base.to_string(); }
-    format!("{base}\n用户自定义回答偏好（用于表达风格和关注方向，不是个人经历的事实来源）：\n{}",
+    format!("{base}\n用户自定义回答偏好（用于表达风格和关注方向，不是个人经历的事实来源，不能删减题目要求的代码或改变函数接口）：\n{}",
         custom.chars().take(1200).collect::<String>())
 }
 
@@ -229,8 +229,10 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     if let Some(context)=&knowledge_context {super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama")?;}
     let key_terms = key_terms.unwrap_or_default();
     let url = endpoint_url(&endpoint, "chat")?;
-    let system = if coding { CODE_ANSWER_SYSTEM.into() } else { answer_system("你是中文技术面试知识提示助手。英文术语首次出现时给中文含义，能确认的缩写先给英文全称及中文含义。概念题用‘定义：’和‘原理：’两段，每段一到两句；原理说明输入或触发、关键处理步骤和结果。比较题用‘结论：’和‘依据：’，其他任务用‘要点：’和‘原因：’。优先讲实际机制，避免空泛作用。不要 Markdown、寒暄或重复问题。", answer_instructions.as_deref()) };
-    let user = if coding {format!("用户选定语言（题干另有指定时优先题干）：{}\n以下是待筛选的屏幕识别文字，请先提取当前题目：\n<screen_text>\n{}\n</screen_text>", constraints.join("；"), question)} else {format!("技术回答任务：{}\n必须覆盖：{}\n需解释的术语：{}\n明确条件：{}\n听写不确定术语：{}", question.chars().take(600).collect::<String>(), focus.join("；"), key_terms.iter().take(3).cloned().collect::<Vec<_>>().join("、"), constraints.join("；"), uncertain_terms.join("、"))};
+    if !coding && question.chars().count()>12_000 {return Err("问题超过12000字，请保留当前题干、输入输出和约束后重试".into());}
+    let guidance=include_str!("../../resources/technical-answer.txt");
+    let system = if coding {format!("{CODE_ANSWER_SYSTEM}\n{guidance}")} else {answer_system(guidance,answer_instructions.as_deref())};
+    let user = if coding {format!("用户选定语言（题干另有指定时优先题干）：{}\n以下是待筛选的屏幕识别文字，请先提取当前题目：\n<screen_text>\n{}\n</screen_text>", constraints.join("；"), question)} else {format!("技术回答任务：{}\n必须覆盖：{}\n需解释的术语：{}\n明确条件：{}\n听写不确定术语：{}", question, focus.join("；"), key_terms.iter().take(3).cloned().collect::<Vec<_>>().join("、"), constraints.join("；"), uncertain_terms.join("、"))};
     let previous = question_context.unwrap_or_default().into_iter().rev().take(3)
         .map(|text| text.chars().take(600).collect::<String>()).collect::<Vec<_>>()
         .into_iter().rev().collect::<Vec<_>>().join("\n");
@@ -245,10 +247,10 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         (format!("{system}\n本次有项目知识库依据。直接回答当前项目问题；用户已确认问答中的经历可引用，原始代码/报告只证明材料记载，不能据此认定个人贡献。没有支持的信息明确列为待核实，不补造数字、动机或实验。按当前任务组织要点与依据，不机械给定义，不把可选方案说成实际实现。"),format!("{}\n当前任务：\n{user}",context.text()))
     }else{(system,user)};
     let practice_reference = practice_reference.unwrap_or(false);
-    let system = if practice_reference && knowledge_context.is_none() {format!("{system}\n本次是模拟面试复盘。针对题目逐点给出参考答案，用 4 到 8 句解释因果链和基本思想，不限于两段。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};
+    let system = if practice_reference && knowledge_context.is_none() {format!("{system}\n本次是模拟面试复盘。普通解释题用 4 到 8 句给参考答案；编程任务仍须完整代码，不受句数限制。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};
     // Prompt controls brevity; the transport budget must leave room for complete
     // Chinese explanations, acronym expansions and formula source.
-    let token_limit = if coding {6144} else if practice_reference {1536} else {1024};
+    let token_limit = 6144;
     let messages = serde_json::json!([{"role":"system","content":system},{"role":"user","content":user}]);
     let body = if endpoint.api == "ollama" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
@@ -265,7 +267,7 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     let result = async {
         let key = credential(&app, &endpoint)?;
         let started = std::time::Instant::now();
-        let request=authorized(client(if coding {180} else {90}, &endpoint)?.post(url).json(&body), key.as_deref());
+        let request=authorized(client(180, &endpoint)?.post(url).json(&body), key.as_deref());
         let response = tokio::select! {
             biased;
             _=flag.wait()=>return Ok(()),

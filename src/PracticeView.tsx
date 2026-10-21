@@ -6,6 +6,7 @@ import {UserCancelled,isUserCancelled} from './inAppActions';
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
 import { MathText } from "./MathText";
+import {AnswerText} from "./AnswerText";
 import type {HistoryRecorder} from "./history";
 import {SetupGuide,type GuideSetup} from "./SetupGuide";
 import {usePanelLayout} from "./usePanelLayout";
@@ -100,6 +101,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     domain,local,personalization,resume,analysis});
   const authorizeBackground=async (background:PracticeBackground,label:string,projectQuestion=false)=>{
     if(local)return false;
+    if(label!=="简历分析")return true;
     const includesResume=!!(background.resumeText || background.resumeAnalysis);
     if(!includesResume && !projectQuestion)return false;
     const destination=(()=>{try{return new URL(model.baseUrl).host;}catch{return model.baseUrl;}})();
@@ -162,7 +164,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       }
       const background=currentQuestion.background || currentBackground();
       let knowledgeContext:KnowledgeContext|undefined;
-      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,await history.endpoint(model,"参考检索",stillCurrent),stillCurrent);if(!stillCurrent()||bank.cancelled)return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
+      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,await history.endpoint(model,"参考检索",stillCurrent),stillCurrent);if(!stillCurrent())return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
       const consentToSendResume=knowledgeContext ? false : await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
       if(!stillCurrent())return;
       if(local)await invoke("start_local_service",{service:"ollama"});
@@ -258,7 +260,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     setBusy("feedback");setError("");
     try {
       let knowledgeContext:KnowledgeContext|undefined;
-      if(currentQuestion.bankQuestion){const agreed=local||await confirmSend(`本次评价将发送当前问题、你的作答与该题的已确认标准回答，发送至 ${model.baseUrl}，模型 ${model.model}；不发送简历全文或其他资料。仅本次授权，是否继续？`,{title:"确认本次题库评价发送",kind:"warning"});if(!agreed)throw new UserCancelled("已取消评价");knowledgeContext={questions:[currentQuestion.bankQuestion],passages:[],consent:true};}
+      if(currentQuestion.bankQuestion){knowledgeContext={questions:[currentQuestion.bankQuestion],passages:[],consent:true};}
       const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer,knowledgeContext},currentQuestion.background);
       if(!operationRef.current.current(token))return;
       const result = value as Feedback;
@@ -416,7 +418,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
           {!!feedback.missing?.length && <><h3>对照本题检查</h3><ul>{feedback.missing.map((item,index)=><li key={index}>{aspects[item]}</li>)}</ul></>}
         </>}
         <div className="practice-reference-answer"><h3>{(feedback.questionKind==="technical"||feedback.corrections!==undefined||feedback.missingPoints!==undefined) ? "参考答案" : "回答思路"}</h3>
-          {reference.text && <p><MathText text={reference.text}/></p>}
+          {reference.text && <p><AnswerText text={reference.text}/></p>}
           {reference.loading && <p role="status">{reference.text ? "正在继续生成…" : "回答模型正在生成参考内容…"}</p>}
           {reference.error && <p className="practice-reference-error" role="alert">{reference.error}</p>}
           {!reference.loading && (!reference.text || reference.error) && <button className="practice-secondary" disabled={updating || !!busy}
