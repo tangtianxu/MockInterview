@@ -6,6 +6,7 @@ pub mod db;
 pub mod intelligence;
 pub mod interview_library;
 pub mod knowledge;
+mod knowledge_search;
 pub mod knowledge_documents;
 pub mod knowledge_build;
 pub mod knowledge_intake;
@@ -452,6 +453,7 @@ pub fn run() {
             mvp_commands::mvp_copy_model_key,
             mvp_commands::mvp_decide,
             mvp_commands::mvp_answer,
+            commands::screen_commands::capture_code_screen,
             knowledge_commands::knowledge_snapshot,
             knowledge_commands::knowledge_record_read,
             knowledge_commands::knowledge_save_inbox,

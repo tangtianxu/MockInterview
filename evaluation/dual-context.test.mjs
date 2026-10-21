@@ -13,6 +13,7 @@ test('dual and microphone-only transcription route questions and preserve contex
  window.calls=[];window.decisions=[];window.hold=false;window.send=async(name,payload)=>emit(name,payload);
  mockIPC(async(command,args)=>{window.calls.push({command,args,at:performance.now()});
  if(command==='load_interview_profile')return null;
+ if(command==='knowledge_lookup')return {enabled:false,exact:null,questions:[],passages:[],projects:[]};
  if(command==='plugin:app|version')return 'test';
  if(command==='list_audio_devices')return JSON.stringify({inputs:[{id:'fixture-mic',name:'测试麦克风'}],outputs:[{id:'fixture-speakers',name:'测试扬声器'}]});
  if(command==='list_local_stt_engines')return JSON.stringify([{engine:'whisper_cpp',name:'Whisper',models:[{definition:{model_id:'small',display_name:'Small',is_streaming:true},is_downloaded:true}]}]);
@@ -24,9 +25,9 @@ test('dual and microphone-only transcription route questions and preserve contex
  if(command.includes('is_registered'))return false;
  if(command==='mvp_decide'){
   if(window.decisions.length)return window.decisions.shift();
-  const text=args.input.currentText;
+  const text=args.input.turns.filter(t=>t.current).map(t=>t.text).join('\\n');
   const intro=text==='请介绍一下你自己';
-  const question=text==='为什么选择它'&&args.input.context.includes('GAE')?'为什么选择 GAE':text;
+  const question=text==='为什么选择它'&&args.input.turns.some(t=>!t.current&&t.text.includes('GAE'))?'为什么选择 GAE':text;
   return {intent:intro?'self_introduction':'question',relation:'new',action:'show',question:intro?'请进行自我介绍':question,focus:[],key_terms:[],constraints:[],uncertain_terms:[]};
  }
  if(command==='mvp_answer'){
@@ -42,7 +43,7 @@ test('dual and microphone-only transcription route questions and preserve contex
  const url='http://127.0.0.1:5197/'+fixture;
  for(let i=0;i<70;i++){if(server.exitCode!==null)throw new Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(resolve=>setTimeout(resolve,100));}
  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:1360,height:850}});page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));
- async function load(query=''){await page.goto(url+query);await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();await page.getByRole('button',{name:'开始聆听',exact:true}).click();await page.getByRole('button',{name:'结束练习',exact:true}).waitFor();}
+ async function load(query=''){await page.goto(url+query,{waitUntil:'domcontentloaded',timeout:30000});await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();await page.getByRole('button',{name:'开始聆听',exact:true}).click();await page.getByRole('button',{name:'结束练习',exact:true}).waitFor();}
  async function speech(speaker,id,text,time,final=true){await page.evaluate(({speaker,id,text,time,final})=>window.send(final?'transcript_final':'transcript_update',{segment:{id,text,speaker,timestamp_ms:time,is_final:final}}),{speaker,id,text,time,final});}
  // Existing profiles without an interval get the new 5-second default.
  await load('?throttle=1');
@@ -57,8 +58,8 @@ test('dual and microphone-only transcription route questions and preserve contex
  await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===2);
  const batch=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide'));
  assert.ok(batch[1].at-batch[0].at>=4990,'requests are separated by at least 5 seconds, allowing timer precision');
- assert.equal(batch[1].args.input.currentText,'实际部署出现动作抖动\n怎么解决这个问题');
- assert.match(batch[1].args.input.context,/PPO 是什么/);assert.doesNotMatch(batch[1].args.input.context,/实际部署/);
+ assert.equal(batch[1].args.input.turns.filter(t=>t.current).map(t=>t.text).join('\n'),'实际部署出现动作抖动\n怎么解决这个问题');
+ assert.match(batch[1].args.input.turns.filter(t=>!t.current).map(t=>t.text).join('\n'),/PPO 是什么/);assert.doesNotMatch(batch[1].args.input.turns.filter(t=>!t.current).map(t=>t.text).join('\n'),/实际部署/);
  await page.waitForTimeout(500);assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').length),2);
  await speech('Them','cancelled','结束后不应发出此请求',400);
  await page.getByRole('button',{name:'结束练习',exact:true}).click();await page.waitForTimeout(5100);
@@ -80,8 +81,8 @@ test('dual and microphone-only transcription route questions and preserve contex
  await speech('Them','reply-2','集的构成首先要做到尽量的',400,false);
  await page.locator('.answer-text').filter({hasText:'如何提升模型的泛化能力'}).waitFor();
  const mixed=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
- assert.equal(mixed.currentText,'那一般怎么样去提升模型的方法能力呢\n嗯首先是呢需要对区域训练它这个过程当中他的数据\n集的构成首先要做到尽量的');
- assert.match(mixed.context,/解释一下模型的泛化能力/);assert.equal(mixed.isFinal,false);
+ assert.equal(mixed.turns.filter(t=>t.current).map(t=>t.text).join('\n'),'那一般怎么样去提升模型的方法能力呢\n嗯首先是呢需要对区域训练它这个过程当中他的数据\n集的构成首先要做到尽量的');
+ assert.match(mixed.turns.filter(t=>!t.current).map(t=>t.text).join('\n'),/解释一下模型的泛化能力/);assert.equal(mixed.turns.at(-1).isFinal,false);
  assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),2);
  await page.evaluate(d=>window.decisions.push(d),decision('','none','wait','statement'));
  await speech('Them','reply-2','集的构成首先要做到尽量的覆盖测试分布',400);
@@ -122,11 +123,11 @@ test('dual and microphone-only transcription route questions and preserve contex
  assert.match(await page.locator('.transcript-scroll').textContent(),/我的回答/);
  await speech('Them','c','为什么选择它',300);await page.locator('.answer-text').filter({hasText:'为什么选择 GAE'}).waitFor();
  const follow=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
- assert.equal(follow.candidateReply,'我采用的是 GAE');assert.match(follow.context,/候选人：我采用的是 GAE/);assert.match(follow.context,/面试官：介绍 PPO/);
+ assert.ok(follow.turns.some(t=>!t.current&&t.channel==='microphone'&&t.text==='我采用的是 GAE'));assert.ok(follow.turns.some(t=>!t.current&&t.text.includes('介绍 PPO')));
  // Partial candidate replies also reach the next question without generating their own task.
  await speech('User','d','这里使用了优势归一化',400,false);
  await speech('Them','e','如何实现这个步骤',500);await page.locator('.answer-text').filter({hasText:'如何实现这个步骤'}).waitFor();
- assert.match(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input.context),/候选人：这里使用了优势归一化/);
+ assert.match(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input.turns.filter(t=>!t.current).map(t=>t.text).join('\n')),/这里使用了优势归一化/);
  // Introduction cancels an unfinished answer, remains visible while speaking and never invokes explanation.
  await page.evaluate(()=>window.hold=true);await speech('Them','f','解释 Transformer',600);await page.locator('.answer-text').filter({hasText:'Transformer'}).waitFor();
  const old=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').at(-1).args.requestId);
@@ -196,7 +197,7 @@ test('dual and microphone-only transcription route questions and preserve contex
   await speech('Them','offline-followup','什么时候使用',200);
   await page.locator('.answer-text').filter({hasText:'什么时候使用'}).waitFor();
   const follow=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
-  assert.match(follow.context,/PPO 的原理/);assert.equal(follow.videoMode,false);
+  assert.ok(follow.turns.some(t=>!t.current&&t.text.includes('PPO 的原理')));assert.equal(follow.mode,'offline');
   assert.equal(await page.getByRole('button',{name:/线下面试/}).isDisabled(),true);
   await page.getByRole('button',{name:'结束练习',exact:true}).click();
   await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'音频设备'}).click();

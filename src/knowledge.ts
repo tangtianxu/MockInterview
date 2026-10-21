@@ -9,7 +9,7 @@ export type ProjectProposal={sourceId:string;hash:string;project:string;reason:s
 export type KnowledgeLibrary={enabled:boolean;activeProject:string;buildModel:string;folders:string[];sources:KnowledgeSource[];organizationMode?:'auto'|'organized';projectProposals?:ProjectProposal[]};
 export type KnowledgeInbox={items:BankQuestion[];matches:KnowledgeMatch[];drafts:KnowledgeResult[];editor:BankQuestion|null;cursor:{signature:string;next:number;total:number;project?:string;sourceIds?:string[];kind?:'build'}|null};
 export type KnowledgeSnapshot={diagnosticId?:string;root:string;library:KnowledgeLibrary;questions:BankQuestion[];errors:string[];inbox?:KnowledgeInbox};
-export type KnowledgeMatch={questionId:string;duplicateId:string;relation:string;reason:string};
+export type KnowledgeMatch={questionId:string;duplicateId:string;relation:string;reason:string;needsPersonalEvidence?:boolean};
 export type KnowledgeResult={items:BankQuestion[];matches:KnowledgeMatch[];warnings:string[];model:string;elapsedMs:number;usage:any;organization?:ProjectProposal[]};
 export type KnowledgePassage={sourceId:string;hash:string;project:string;path:string;locator:string;text:string};
 export type KnowledgeLookup={enabled:boolean;exact:BankQuestion|null;questions:BankQuestion[];passages:KnowledgePassage[];projects:string[];ambiguous?:boolean};
@@ -34,25 +34,38 @@ export function effectiveExports(items:BankQuestion[],matches:KnowledgeMatch[],b
 }
 // A saved verbatim answer never leaves this machine. Semantic matching and
 // synthesis require fresh consent for the actual payload, not a stored toggle.
-export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean):Promise<{exact?:BankQuestion;context?:KnowledgeContext;missingProject?:boolean;missingEvidence?:boolean}>{
- const lookup=await invoke<KnowledgeLookup>('knowledge_lookup',{query});if(!stillCurrent()||!lookup.enabled)return {};
- if(lookup.ambiguous)return {missingProject:true};if(lookup.exact)return {exact:lookup.exact};
- const personalProject=/你(?:们|的)*项目|我(?:们|的)*项目|项目(?:中|里)|这(?:个|一)项目|你(?:负责|做过|实现|参与)/.test(query);
- if(!lookup.questions.length&&!lookup.passages.length)return personalProject?{missingEvidence:true}:{};
- if(!lookup.questions.length&&!personalProject&&!lookup.projects.some(p=>query.toLowerCase().includes(p.replace(/^\d+_/,'').toLowerCase())))return {};
- if(lookup.projects.length>1&&(/项目|我|你|我们|该方案|这个方案|这套|实现|实际/.test(query)||lookup.questions.some(q=>q.category==='项目问题')))return {missingProject:true};
- let matched:BankQuestion|undefined;
- if(lookup.questions.length){
-  const plan=await invoke<KnowledgePlan>('knowledge_prepare',{endpoint,input:{action:'match',question:{...emptyQuestion(),question:query}}});
+export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean,conversation=''):Promise<{exact?:BankQuestion;context?:KnowledgeContext;missingProject?:boolean;missingEvidence?:boolean}>{
+ const lookup=await invoke<KnowledgeLookup>('knowledge_lookup',{query,context:conversation,historySessionId:endpoint.historySessionId});
+ if(!stillCurrent()||!lookup.enabled)return {};
+ if(lookup.exact)return {exact:lookup.exact};
+ let selected:BankQuestion[]=[];let passages=lookup.passages;
+ {
+  const plan=await invoke<KnowledgePlan>('knowledge_prepare',{endpoint,input:{action:'match',question:{...emptyQuestion(),question:query},dialogueContext:conversation}});
   if(!stillCurrent()){await invoke('knowledge_discard_plan',{token:plan.token});return {};}
-  const agreed=endpoint.api==='ollama'||await ask(`本次问题匹配将发送问题和 ${lookup.questions.length} 条题目标题（含项目名），不发送标准答案或原资料。\n目标：${plan.destination}\n模型：${plan.model}\n约 ${plan.characters} 字。仅本次授权，是否发送？`,{title:'确认本次题库匹配发送',kind:'warning'});
+  const agreed=endpoint.api==='ollama'||await ask(`本次语义检索将发送当前问题、最近对话，以及 ${lookup.questions.length} 条候选标题、别名和项目名称，不发送标准答案或原资料。\n目标：${plan.destination}\n模型：${plan.model}\n约 ${plan.characters} 字。仅本次授权，是否发送？`,{title:'确认本次题库匹配发送',kind:'warning'});
   if(!agreed){await invoke('knowledge_discard_plan',{token:plan.token});throw Error('已取消本次项目问题匹配');}
   if(!stillCurrent()){await invoke('knowledge_discard_plan',{token:plan.token});return {};}
   const result=await invoke<KnowledgeResult>('knowledge_run',{token:plan.token,consent:true});if(!stillCurrent())return {};
-  if(result.matches[0]?.relation==='same')matched=result.items[0];
-  if(matched){const fresh=await readKnowledgeSnapshot();if(!stillCurrent())return {};const current=fresh.questions.find(q=>q.id===matched!.id&&q.status==='confirmed'&&q.question===matched!.question&&q.project===matched!.project&&q.task===matched!.task&&q.answer===matched!.answer&&q.explanation===matched!.explanation);if(!current)throw Error('题库在匹配期间已更新，请重新提交问题。');return {exact:current};}
+  const relation=result.matches[0]?.relation;
+  if(relation==='ambiguous')return {missingProject:true};
+  selected=result.items.slice(0,5);
+  if(relation==='same'&&selected[0]){
+   const matched=selected[0];const fresh=await readKnowledgeSnapshot();if(!stillCurrent())return {};
+   const current=fresh.questions.find(q=>q.id===matched.id&&q.status==='confirmed'&&q.question===matched.question&&q.project===matched.project&&q.task===matched.task&&q.answer===matched.answer&&q.explanation===matched.explanation);
+   if(!current)throw Error('题库在匹配期间已更新，请重新提交问题。');return {exact:current};
+  }
+  if(relation==='new'){
+   const needsEvidence=result.matches[0]?.needsPersonalEvidence;
+   if(typeof needsEvidence!=='boolean')throw Error('语义检索未判断问题是否需要个人资料依据。');
+   if(!needsEvidence)return {};
+   if(!passages.length)return {missingEvidence:true};
+   if(lookup.projects.length>1)return {missingProject:true};
+  }
+  const project=selected.find(q=>q.project)?.project;
+  if(project){const scoped=await invoke<KnowledgeLookup>('knowledge_lookup',{query:`${project} ${query}`,context:'',historySessionId:endpoint.historySessionId});if(!stillCurrent())return {};passages=scoped.passages.filter(p=>p.project===project);}
  }
- const context={questions:lookup.questions,passages:lookup.passages,consent:false};
+ if(!selected.length&&!passages.length)return {missingEvidence:true};
+ const context={questions:selected,passages:passages.slice(0,5),consent:false};
  const preview=[...context.questions.map(q=>`已确认题目：${q.question}\n回答：${q.answer}\n展开：${q.explanation}`),...context.passages.map(p=>`${p.path} · ${p.locator}\n${p.text}`)].join('\n\n');
  const sources=[...context.questions.map(q=>`题库：${q.question}`),...context.passages.map(p=>`${p.path} · ${p.locator}`)].join('\n');
  const agreed=endpoint.api==='ollama'||await ask(`本次回答会发送当前问题、${context.questions.length} 条已确认问答及 ${context.passages.length} 段相关资料。\n目标：${endpoint.baseUrl}\n模型：${endpoint.model}\n资料范围：\n${sources}\n项目背景约 ${preview.length} 字。仅本次授权，是否发送？`,{title:'确认本次项目背景发送',kind:'warning'});

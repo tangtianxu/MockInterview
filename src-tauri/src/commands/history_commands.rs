@@ -19,8 +19,8 @@ fn connect(app:&AppHandle)->Result<Connection,String>{let root=app.path().app_co
 fn session_id(id:&str)->Result<(),String>{uuid::Uuid::parse_str(id).map(|_|()).map_err(|_|"历史会话 ID 无效".into())}
 fn write_entry(db:&Connection,id:&str,entry:&Entry)->Result<(),String>{
  session_id(id)?;
- if entry.id.is_empty()||entry.id.len()>120||!entry.id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_')||!matches!(entry.kind.as_str(),"transcript"|"question"|"answer"|"feedback"|"detail"|"usage")||entry.at.len()>40||entry.text.len()>64*1024{return Err("历史条目格式无效或内容过长".into());}
- let data=serde_json::to_string(&entry.data).map_err(|e|e.to_string())?;if data.len()>64*1024{return Err("历史条目附加内容过长".into());}
+ if entry.id.is_empty()||entry.id.len()>120||!entry.id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_')||!matches!(entry.kind.as_str(),"transcript"|"question"|"answer"|"feedback"|"detail"|"usage"|"decision"|"retrieval")||entry.at.len()>40||entry.text.len()>64*1024{return Err("历史条目格式无效或内容过长".into());}
+ let data=serde_json::to_string(&entry.data).map_err(|e|e.to_string())?;if data.len()>if matches!(entry.kind.as_str(),"decision"|"retrieval"){128*1024}else{64*1024}{return Err("历史条目附加内容过长".into());}
  db.execute("INSERT INTO history_entries(session_id,id,kind,at,text,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,id) DO UPDATE SET text=excluded.text,data=excluded.data",params![id,entry.id,entry.kind,entry.at,entry.text,data]).map_err(|e|e.to_string())?;Ok(())
 }
 #[command]
@@ -46,7 +46,7 @@ pub fn history_delete(app:AppHandle,id:String)->Result<(),String>{session_id(&id
 pub fn history_export(app:AppHandle,id:String,path:String)->Result<(),String>{let value=read(&connect(&app)?,&id)?;let target=Path::new(&path);if !target.is_absolute(){return Err("请选择完整的导出路径".into());}
  let content=match target.extension().and_then(|s|s.to_str()).map(str::to_lowercase).as_deref(){Some("json")=>serde_json::to_string_pretty(&value).map_err(|e|e.to_string())?,Some("md")=>{
  let mut text=format!("# {}\n\n开始：{}\n\n",value["session"]["title"].as_str().unwrap_or("历史会话"),value["session"]["startedAt"].as_str().unwrap_or(""));
- for entry in value["entries"].as_array().unwrap(){text.push_str(&format!("## {} · {}\n\n{}\n\n",entry["kind"].as_str().unwrap_or(""),entry["at"].as_str().unwrap_or(""),entry["text"].as_str().unwrap_or("")));if entry["kind"]=="usage"||entry["kind"]=="feedback" {text.push_str(&format!("```json\n{}\n```\n\n",serde_json::to_string_pretty(&entry["data"]).unwrap_or_default()));}}
+ for entry in value["entries"].as_array().unwrap(){text.push_str(&format!("## {} · {}\n\n{}\n\n",entry["kind"].as_str().unwrap_or(""),entry["at"].as_str().unwrap_or(""),entry["text"].as_str().unwrap_or("")));if entry["kind"]=="usage"||entry["kind"]=="feedback"||entry["kind"]=="decision"||entry["kind"]=="retrieval" {text.push_str(&format!("```json\n{}\n```\n\n",serde_json::to_string_pretty(&entry["data"]).unwrap_or_default()));}}
  text},_=>return Err("请选择 Markdown 或 JSON 文件".into())};fs::write(target,content).map_err(|e|e.to_string())}
 
 pub fn record_usage(app:&AppHandle,id:Option<&str>,stage:&str,model:&str,provider:&str,value:&Value){
@@ -56,4 +56,12 @@ pub fn record_usage(app:&AppHandle,id:Option<&str>,stage:&str,model:&str,provide
 }
 #[cfg(test)]mod tests{use super::*;
  #[test]fn history_upserts_keeps_order_and_cascade_deletes(){let db=Connection::open_in_memory().unwrap();schema(&db).unwrap();let id=uuid::Uuid::new_v4().to_string();db.execute("INSERT INTO history_sessions(id,mode,started_at,title) VALUES(?1,'live','2026-10-10','测试')",[&id]).unwrap();let mut entry=Entry{id:"a-1".into(),kind:"answer".into(),at:"now".into(),text:"增量".into(),data:Value::Null};write_entry(&db,&id,&entry).unwrap();entry.text="完整内容".into();write_entry(&db,&id,&entry).unwrap();let saved=read(&db,&id).unwrap();assert_eq!(saved["entries"].as_array().unwrap().len(),1);assert_eq!(saved["entries"][0]["text"],"完整内容");db.execute("DELETE FROM history_sessions WHERE id=?1",[id]).unwrap();assert_eq!(db.query_row("SELECT count(*) FROM history_entries",[],|r|r.get::<_,i64>(0)).unwrap(),0);}
+}
+
+/// Audit records stay on this machine alongside the transcript. Oversized windows
+/// are rejected with a visible history error, never silently substituted.
+pub fn record_audit(app:&AppHandle,id:Option<&str>,kind:&str,summary:&str,data:Value){
+ let Some(id)=id else{return};
+ let entry=Entry{id:uuid::Uuid::new_v4().to_string(),kind:kind.into(),at:chrono::Local::now().to_rfc3339(),text:summary.into(),data};
+ if let Err(error)=connect(app).and_then(|db|write_entry(&db,id,&entry)){log::warn!("History audit save failed: {error}");let _=tauri::Emitter::emit(app,"history_save_error",error);}
 }

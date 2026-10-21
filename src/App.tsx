@@ -10,9 +10,9 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headphones, LockKeyhole, Pencil,
   Maximize2, Mic2, Minus, MonitorPlay, Moon, PanelLeftClose, PanelLeftOpen, Pause, Pin, Play, Radio, RefreshCw, ScanText, Settings2, Sparkles, Sun,
   Square, Volume2, X } from "lucide-react";
-import { questionTransition } from "./decisionStability";
-import {DecisionScheduler,decisionIntervalSeconds} from "./decisionScheduler";
-import { dialogueContext } from "./dialogueContext";
+import { questionTransition, sameQuestion } from "./decisionStability";
+import {DecisionScheduler,decisionIntervalSeconds,decisionEvidenceSource} from "./decisionScheduler";
+import { taskWindow,dialogueContext } from "./dialogueContext";
 import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
@@ -29,6 +29,7 @@ import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 import {usePanelLayout} from "./usePanelLayout";
 import {TestGuide} from "./TestGuide";
 import {dragWindow} from './windowDrag';
+import {useScreenCode,ScreenCodePanel,ScreenShortcutEditor,CodeAnswer,DEFAULT_SCREEN_SHORTCUT,CODE_LANGUAGES} from './ScreenCode';
 
 type Api = ModelApi;
 type SttMode = "local" | "api";
@@ -45,7 +46,7 @@ type Settings = {
   decision: ModelConfig; answer: ModelConfig; answerInstructions: string;
   sharedModelConnection: boolean; separateDecision?: ModelConfig;
   parallelAnswer: boolean; parallelLocal: ModelConfig;
-  launcherOnTop: boolean; quitShortcut: string;
+  launcherOnTop: boolean; quitShortcut: string; screenShortcut:string; screenCodeLanguage:string;
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
   targetRole: string; focusTopics: string; resumePath: string;
@@ -60,9 +61,9 @@ type ModelInfo = { id: string; name: string; is_downloaded: boolean; is_streamin
 type EngineInfo = { engine: string; name: string; models: ModelInfo[] };
 type Segment = { id: string; text: string; speaker: string; timestamp_ms: number; is_final: boolean };
 type Decision = { intent: string; relation: string; action: "wait" | "show" | "revise" | "keep"; question: string;
-  focus: string[]; key_terms: string[]; constraints: string[]; uncertain_terms: string[] };
+  focus: string[]; key_terms: string[]; constraints: string[]; uncertain_terms: string[]; evidence?:{turn_id:string;quote:string}[] };
 type OverlayState = { question: string; hint: string; status: Status; locked: boolean;
-  uncertainTerms: string[]; keyTerms: string[]; detail: string; detailLoading: boolean; detailAvailable?:boolean };
+  uncertainTerms: string[]; keyTerms: string[]; detail: string; detailLoading: boolean; detailAvailable?:boolean; coding?:boolean };
 type PracticePreview = {question:string;hint:string};
 
 const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在进行秋招技术面试。请把听到的技术问题转成便于口头回答的中文提示：首次出现英文术语时给中文释义，缩写能确认时先给英文全称和中文含义；然后简短说明定义与关键原理。每段一到两句话，避免空话。比较题说明选择依据和适用边界；不要编造我的项目经历。";
@@ -70,7 +71,7 @@ const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在
 const defaults: Settings = {
   mode: "live", output: "default", mic: "default", sttMode: "local", sttEngine: "sherpa_bilingual", sttModel: "paraformer-zh-en",
   sttApiProvider: "groq_whisper", sttApiModel: "whisper-large-v3-turbo", domain: "general",
-  launcherOnTop: false, quitShortcut: "Control+Backquote",
+  launcherOnTop: false, quitShortcut: "Control+Backquote", screenShortcut:DEFAULT_SCREEN_SHORTCUT, screenCodeLanguage:"Python 3",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
   micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,decisionIntervalSeconds:5,
@@ -117,6 +118,8 @@ function loadSettings(input?: unknown): Settings {
       resumePath:typeof old.resumePath === "string" ? old.resumePath : "",
       answerInstructions:typeof old.answerInstructions === "string" ? old.answerInstructions.slice(0,1200) : "",
       quitShortcut:typeof old.quitShortcut === "string" && old.quitShortcut ? old.quitShortcut : defaults.quitShortcut,
+      screenShortcut:typeof old.screenShortcut === "string" && /^(?:(?:Control|Alt|Shift)\+)*F(?:[1-9]|1[0-2])$/.test(old.screenShortcut)?old.screenShortcut:DEFAULT_SCREEN_SHORTCUT,
+      screenCodeLanguage:CODE_LANGUAGES.includes(old.screenCodeLanguage)?old.screenCodeLanguage:"Python 3",
       transcriptVisible:old.transcriptVisible !== false,
       answerVisible:old.answerVisible !== false,
       theme:old.theme === "light" ? "light" : "dark",
@@ -250,7 +253,7 @@ function Overlay() {
       <div className="floating-question"><MathText text={practice ? (practice.question || "等待练习问题…") : (state.question || "等待面试官提出问题…")}/></div>
       {!practice && state.keyTerms.length > 0 && <div className="term-list">{state.keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
       {!practice && state.uncertainTerms.length > 0 && <div className="term-warning">术语待确认：{state.uncertainTerms.join("、")}</div>}
-      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <MathText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? <MathText text={state.hint}/> : <span className="placeholder">答案要点会出现在这里</span>)}</div>
+      <div className={expanded ? "floating-answer expanded" : "floating-answer"}>{practice ? (practice.hint ? <MathText text={practice.hint}/> : <span className="placeholder">回答后查看复盘</span>) : (state.hint ? (state.coding?<CodeAnswer text={state.hint}/>:<MathText text={state.hint}/>) : <span className="placeholder">答案要点会出现在这里</span>)}</div>
       {!practice && state.hint && state.detailAvailable!==false && <button className="floating-expand" onClick={()=>{
         if (!expanded && (!state.detail || state.detail.startsWith("原理解释失败：")) && !state.detailLoading)
           void emit("mvp_detail_request");
@@ -266,6 +269,8 @@ function Overlay() {
 function Main() {
   const version = useAppVersion();
   const [workspaceMode, setWorkspaceMode] = useState<"practice" | "assist">("practice");
+  const [answerView,setAnswerView]=useState<"voice"|"screen">("voice");
+  const [recordingScreenShortcut,setRecordingScreenShortcut]=useState(false);
   const [practiceSetupVisible,setPracticeSetupVisible] = useState(true);
   const [practiceFeedbackVisible,setPracticeFeedbackVisible] = useState(true);
   const [practiceActive, setPracticeActive] = useState(false);
@@ -350,7 +355,7 @@ function Main() {
   const [knowledgeEnabled,setKnowledgeEnabled]=useState(false);
   const knowledgeEnabledRef=useRef(false);knowledgeEnabledRef.current=knowledgeEnabled;
   const knowledgeAnswerRef=useRef(false);
-  useEffect(()=>{void readKnowledgeSnapshot().then(s=>setKnowledgeEnabled(s.library.enabled)).catch(()=>{});},[]);
+  useEffect(()=>{void readKnowledgeSnapshot().then(s=>setKnowledgeEnabled(s.library.enabled)).catch(cause=>setError(`面试准备状态读取失败：${String(cause)}`));},[]);
   const {recorder:liveHistory,error:historyError}=useHistoryRecorder();
   const [historyNativeError,setHistoryNativeError]=useState("");
   const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
@@ -479,7 +484,16 @@ function Main() {
     }).then(unlisten=>{if(cancelled)unlisten();else stop=unlisten;});
     return()=>{cancelled=true;stop?.();};
   },[]);
-  const updateBlocked=running || practiceActive || practiceWorking || knowledgeBusy || !profileReady ||
+  const screen=useScreenCode({enabled:workspaceMode==="assist",shortcutEnabled:profileReady&&!recordingQuitShortcut&&!recordingScreenShortcut,
+    blocked:()=>updater.busy||modelRemovalRef.current||knowledgeBusy||!profileReady,
+    shortcut:settings.screenShortcut,forbidden:[settings.quitShortcut,restoreShortcutRef.current],
+    language:settings.screenCodeLanguage,endpoint:endpoint(settings.answer,"answer"),history:liveHistory,
+    onOpen:()=>{setAnswerView("screen");setSettings(current=>({...current,answerVisible:true}));}});
+  const codeOverlayRef=useRef<OverlayState|null>(null);
+  codeOverlayRef.current=workspaceMode==="assist"&&answerView==="screen"?{
+    question:"屏幕代码题",hint:screen.answer||screen.error||(screen.phase==="capturing"?"正在截屏识题…":"展示题目后按 "+settings.screenShortcut),
+    status:screen.error?"error":screen.busy?"generating":"idle",locked:false,uncertainTerms:[],keyTerms:[],detail:"",detailLoading:false,detailAvailable:false,coding:true}:null;
+  const updateBlocked=screen.busy || running || practiceActive || practiceWorking || knowledgeBusy || !profileReady ||
     startingService || testingModel!==null || linkingModels || !!download || pulling || deletingModel || managingOllama ||
     status==="deciding" || status==="generating" || detailLoading;
   const updater=useSoftwareUpdate(updateBlocked,flushProfile);
@@ -541,6 +555,7 @@ function Main() {
       if(cancelled || recordingQuitShortcut)return;
       try {
         if(shortcut===restoreShortcutRef.current)throw new Error("该组合键已用于恢复任务栏");
+        if(shortcut===settingsRef.current.screenShortcut)throw new Error("该组合键已用于截屏解题");
         // A WebView reload can leave an app-owned registration behind.
         if(await isRegistered(shortcut))await unregister(shortcut);
         if(cancelled)return;
@@ -575,8 +590,8 @@ function Main() {
   }, [segments, partial, micPartial, workspaceMode]);
   useEffect(() => {
     const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:knowledgeAnswerRef.current?!!detail:answerSource!=="saved"};
-    void emit("mvp_ui_state", state);
-  }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, answerSource]);
+    void emit("mvp_ui_state", codeOverlayRef.current || state);
+  }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, answerSource,answerView,screen.answer,screen.phase,screen.error,workspaceMode]);
 
   const refreshDevices = useCallback(async () => {
     try { setDevices(JSON.parse(await invoke<string>("list_audio_devices"))); }
@@ -634,7 +649,7 @@ function Main() {
       const errors:string[]=[];
       for(const shortcut of ["Control+Shift+Backquote","Control+Alt+Shift+F12"]){
         try {
-          if(shortcut===settingsRef.current.quitShortcut)continue;
+          if(shortcut===settingsRef.current.quitShortcut||shortcut===settingsRef.current.screenShortcut)continue;
           if(await isRegistered(shortcut))await unregister(shortcut);
           await register(shortcut,restore);
           if(!active){await unregister(shortcut);return;}
@@ -752,14 +767,14 @@ function Main() {
           }
           return names;
         },
-        test:current=>invoke("mvp_test_model_endpoint",{endpoint:endpoint(current,stage,shared)})
+        test:current=>invoke("mvp_test_model_endpoint",{endpoint:endpoint(current,stage,shared),structured:shared||stage==="decision"||knowledgeEnabledRef.current})
       });
       if(epoch!==connectionEpochRef.current)return;
       if(result.config.model!==config.model)commitModelConfig(stage,{model:result.config.model});
       setConnectedModels(current=>({...current,[stage]:result.config.model}));
       if(stage==="answer")localStorage.setItem("mockInterview.guideConnection",JSON.stringify([result.config.api,result.config.baseUrl,result.config.model]));
       setModelErrors(current=>({...current,[stage]:result.listError ? modelConnectionError(config,result.listError,true) : ""}));
-      setModelTests(current=>({...current,[stage]:`已连接 · ${result.config.model}。聊天请求已返回有效文字。`}));
+      setModelTests(current=>({...current,[stage]:`已连接 · ${result.config.model}。所需接口已通过检测。`}));
       logDiagnostic("模型对话接口可用",`${stage} · ${config.api} · ${result.config.model}`);
     } catch (cause) {
       if(epoch!==connectionEpochRef.current)return;
@@ -1010,13 +1025,18 @@ function Main() {
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
     liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
+    // Accepted tasks advance immediately, including during a retrieval consent
+    // dialog. A later transcript must not resolve against an older shown answer.
+    const context=rememberQuestion(questionHistoryRef.current,nextQuestion);
+    questionHistoryRef.current=context.history;
+    questionRef.current=nextQuestion;
     knowledgeAnswerRef.current=false;
     let knowledgeContext:KnowledgeContext|undefined;
     const stillCurrent=()=>answerRequestRef.current===requestId&&!softwareUpdatingRef.current;
-    if(knowledgeEnabledRef.current){
+    {
       setStatus("generating");
       try{
-        const result=await knowledgeForQuestion(nextQuestion,liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配"),stillCurrent);
+        const result=await knowledgeForQuestion(nextQuestion,liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配"),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
         if(!stillCurrent())return;
         if(result.missingProject){setError("项目指代不明确，请在“面试准备”的生成与使用设置中指定优先使用的项目，或在问题框写明项目名称。");setStatus("error");return;}
         if(result.missingEvidence){setError("没有检索到这个项目的可靠资料。请先导入项目资料，或编写并确认该题的标准回答。");setStatus("error");return;}
@@ -1043,8 +1063,6 @@ function Main() {
     pendingDisplayRef.current=null;pendingHintRef.current="";
     answerDisplayRef.current={question:nextQuestion,terms,keyTerms,transition,lastShown:"",requestId,
       startedAt:answerStartedRef.current,asrAt,source:requests[0].source};
-    const context=rememberQuestion(questionHistoryRef.current,nextQuestion);
-    questionHistoryRef.current=context.history;
     questionRef.current=nextQuestion;uncertainRef.current=terms;
     answerTaskRef.current=JSON.stringify([nextQuestion,focus,keyTerms,constraints,terms]);
     if(!visibleHintRef.current){setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);}
@@ -1148,28 +1166,18 @@ function Main() {
     setStatus(current => current === "generating" ? current : "deciding");
     const started = performance.now();
     try {
-      if(isSelfIntroductionRequest(pending.text)){
-        if(manualOverrideSourceRef.current && pending.sourceId===manualOverrideSourceRef.current)return;
-        setDecisionMs(Math.round(performance.now()-started));
-        if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==pending.sourceId)
-          showSelfIntroduction(pending.sourceId,pending.receivedAt);
-        return;
-      }
-      const recent=dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],
-        pending.sourceIds,settingsRef.current.mode==="video");
+      const turns=taskWindow(segmentsRef.current,[partialRef.current,micPartialRef.current],pending.turns,settingsRef.current.mode);
       const decision = await invoke<Decision>("mvp_decide", {
         endpoint:liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别"),
-        input:{ context:recent, currentText:pending.text, previousQuestion:questionRef.current,
-          candidateReply:micPartialRef.current?.text || [...segmentsRef.current].reverse().find(item=>item.speaker==="User")?.text || "",
-          visibleQuestion:visibleQuestionRef.current, isFinal:pending.isFinal,
-          videoMode:settingsRef.current.mode === "video",
+        input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,
           projectKnowledge:knowledgeEnabledRef.current,
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
             settingsRef.current.decision.api==="ollama") },
       });
+      const taskSource=decisionEvidenceSource(pending,(decision.evidence||[]).map(e=>e.turn_id));
       const elapsed=Math.round(performance.now()-started);
       if (!runningRef.current || epoch !== sessionEpochRef.current) return;
-      if (manualOverrideSourceRef.current && pending.sourceId === manualOverrideSourceRef.current) {
+      if (manualOverrideSourceRef.current && taskSource.sourceId === manualOverrideSourceRef.current) {
         logDiagnostic("保留手动修正",`忽略同一转录片段的判别 · ${elapsed} ms`);
         if (!answerRequestRef.current) setStatus("listening");
         return;
@@ -1181,20 +1189,20 @@ function Main() {
       // snapshot can still produce an early, revisable hint; the queued text
       // is judged next. A stopped session is never allowed to update the UI.
       if (decision.intent==="self_introduction" && (decision.action==="show" || decision.action==="revise")) {
-        if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==pending.sourceId)showSelfIntroduction(pending.sourceId,pending.receivedAt);
+        if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==taskSource.sourceId)showSelfIntroduction(taskSource.sourceId,taskSource.receivedAt);
       } else if (decision.action === "show" || decision.action === "revise") {
         // Metadata changes alone do not justify regenerating the same question.
-        if (decision.question.trim() === questionRef.current.trim()) {
+        if (sameQuestion(decision.question,questionRef.current)) {
           logDiagnostic("保留当前问题","提取的问题未变化，忽略显示动作及要点变化");
           if (!answerRequestRef.current) setStatus("listening");
           return;
         }
         const transition = questionTransition({hasActiveQuestion:Boolean(questionRef.current),
-          activeSourceId:activeSourceRef.current,sourceId:pending.sourceId,isFinal:pending.isFinal,
-          alreadyRevisedSource:revisedSourceRef.current===pending.sourceId,
+          activeSourceId:activeSourceRef.current,sourceId:taskSource.sourceId,isFinal:taskSource.isFinal,
+          alreadyRevisedSource:revisedSourceRef.current===taskSource.sourceId,
           action:decision.action,relation:decision.relation});
         if (!transition) {
-          logDiagnostic("保留当前问题",`同源 ${activeSourceRef.current===pending.sourceId} · 稳定 ${pending.isFinal} · 已修正 ${revisedSourceRef.current===pending.sourceId} · ${decision.action}/${decision.relation}`);
+          logDiagnostic("保留当前问题",`同源 ${activeSourceRef.current===taskSource.sourceId} · 稳定 ${pending.isFinal} · 已修正 ${revisedSourceRef.current===taskSource.sourceId} · ${decision.action}/${decision.relation}`);
           if (!answerRequestRef.current) setStatus("listening");
           return;
         }
@@ -1203,10 +1211,10 @@ function Main() {
         if (task !== answerTaskRef.current) {
           logDiagnostic("更新回答任务",`${transition} · ${decision.action}/${decision.relation}`);
           manualOverrideSourceRef.current="";
-          if (transition === "revision") revisedSourceRef.current=pending.sourceId;
-          activeSourceRef.current = pending.sourceId;
+          if (transition === "revision") revisedSourceRef.current=taskSource.sourceId;
+          activeSourceRef.current = taskSource.sourceId;
           void startAnswer(decision.question,decision.focus || [],keyTerms,
-            decision.constraints || [],decision.uncertain_terms || [],transition,pending.receivedAt);
+            decision.constraints || [],decision.uncertain_terms || [],transition,taskSource.receivedAt);
         } else if (!answerRequestRef.current) setStatus("listening");
       } else if (!answerRequestRef.current) setStatus("listening");
     } catch (cause) {
@@ -1226,7 +1234,7 @@ function Main() {
   useEffect(() => {
     let active = true; const stops: UnlistenFn[] = [];
     const register = async () => {
-      stops.push(await listen<string>("history_save_error",event=>{if(active)setHistoryNativeError(`历史用量保存失败：${event.payload}`);}));
+      stops.push(await listen<string>("history_save_error",event=>{if(active)setHistoryNativeError(`历史记录保存失败：${event.payload}`);}));
       stops.push(await listen<{segment:Segment}>("transcript_update", event => {
         if (!active || !runningRef.current) return;
         const segment = event.payload.segment;
@@ -1325,6 +1333,7 @@ function Main() {
         if(workspaceModeRef.current==="practice"){
           void emit("mvp_practice_ui_state",{enabled:true,...practicePreviewRef.current});return;
         }
+        if(codeOverlayRef.current){void emit("mvp_ui_state",codeOverlayRef.current);return;}
         void emit("mvp_ui_state", {question:visibleQuestionRef.current,hint:visibleHintRef.current,
           status:"listening",locked:lockedRef.current,uncertainTerms:visibleTermsRef.current,
           keyTerms:visibleKeyTermsRef.current,detail:detailRef.current,detailLoading:detailLoadingRef.current,detailAvailable:knowledgeAnswerRef.current?!!detailRef.current:!savedIntroductionRef.current});
@@ -1559,7 +1568,7 @@ function Main() {
           onChange={e=>{if(e.target.value)updateStage(stage,{model:e.target.value,modelSelection:"manual"});}} disabled={busy}>
           <option value="">手动填写 / 未在列表中</option>{choices.map(model=><option key={model} value={model}>{model}</option>)}</select></label>}
         <button className="text-link" disabled={busy || !config.baseUrl.trim()} onClick={()=>void refreshModels(stage,true)}>刷新模型列表</button>
-        <p className="setting-help">兼容服务需要支持聊天接口；出题、评价和判别还要求模型能按要求输出 JSON。聊天检测通过不代表所有模型都支持结构化结果。</p>
+        <p className="setting-help">兼容服务需要支持聊天接口；模拟练习的出题与评价需要 JSON 输出，语义判别与题库匹配需要 Tool Calling（函数调用）。连接检测会检查当前需要的接口能力。本地 Ollama 使用结构化输出。</p>
       </div>}
     </div>;
   };
@@ -1574,10 +1583,10 @@ function Main() {
       <div className="brand">
         <div className="brand-mark" role="button" tabIndex={0} title="双击切换练习与实时提示页面"
           aria-label="双击切换练习与实时提示页面" onDoubleClick={()=>{
-            if (running || startingService || practiceWorking || practiceActive || updater.busy) {setSwitchNotice("请先结束当前操作");return;}
+            if (screen.busy || running || startingService || practiceWorking || practiceActive || updater.busy) {setSwitchNotice("请先结束当前操作");return;}
             setSwitchNotice("");setWorkspaceMode(value=>value==="practice"?"assist":"practice");
           }}
-          onKeyDown={event=>{if(event.key==="Enter" && !running && !startingService && !practiceWorking && !practiceActive && !updater.busy)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
+          onKeyDown={event=>{if(event.key==="Enter" && !screen.busy && !running && !startingService && !practiceWorking && !practiceActive && !updater.busy)setWorkspaceMode(value=>value==="practice"?"assist":"practice");}}><Sparkles size={22}/></div>
         <div><strong>模拟面试练习 <span className="app-version">{version && `v${version}`}</span></strong>
           <span>{switchNotice || (workspaceMode==="practice"?"模拟面试官 · 回答复盘":"实时听题 · 回答提示")}</span></div></div>
       <div className="header-actions"><span className="local-pill"><span className="live-dot"/> {settings.sttMode === "api" || settings.decision.api !== "ollama" || settings.answer.api !== "ollama" ? "已启用可选 API" : (settings.sharedModelConnection ? answerReady : decisionReady && answerReady) ? "本地模型已连接" : "本地模型未连接"}</span>
@@ -1673,6 +1682,8 @@ function Main() {
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
       </section>
       <section className="answer-panel" style={panelLayout.panelStyle("answer")}><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
+        <div className="screen-tabs" role="tablist" aria-label="回答方式"><button role="tab" aria-selected={answerView==="voice"} onClick={()=>setAnswerView("voice")}>口述问答</button><button role="tab" aria-selected={answerView==="screen"} onClick={()=>setAnswerView("screen")}>截屏解题 · {settings.screenShortcut}</button></div>
+        {answerView==="screen"?<ScreenCodePanel solver={screen} language={settings.screenCodeLanguage} onLanguage={value=>update({screenCodeLanguage:value})} shortcut={settings.screenShortcut}/>:<>
         <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div></div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
               value={questionDraft} maxLength={600} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
@@ -1697,7 +1708,7 @@ function Main() {
           {showDetail && hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           </div>
-        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? (knowledgeAnswerRef.current?"题库标准回答":"已保存的自我介绍") : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div>
+        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? (knowledgeAnswerRef.current?"题库标准回答":"已保存的自我介绍") : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div></>}
       </section>
       {panelLayout.dividers}
     </main>}
@@ -1919,6 +1930,7 @@ function Main() {
             {!recordingQuitShortcut ? <button onClick={()=>{setQuitShortcutDraft("");setRecordingQuitShortcut(true);}}>
               更改快捷键</button> : <>
               <button onClick={()=>{
+                if(quitShortcutDraft===settings.screenShortcut){setQuitShortcutError("该快捷键已用于截屏解题。");return;}
                 if(quitShortcutDraft===restoreShortcutRef.current){setQuitShortcutError("该组合键已用于恢复任务栏，请选择其他组合键。");return;}
                 setSettings(current=>({...current,quitShortcut:quitShortcutDraft}));setRecordingQuitShortcut(false);
               }}
@@ -1928,6 +1940,8 @@ function Main() {
           </div>
           <p className="setting-help">默认 Ctrl + `。录入时同时按 Ctrl、Alt 或 Shift 与字母、数字、F1–F12 或 ` 键；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
+          <ScreenShortcutEditor value={settings.screenShortcut} forbidden={[settings.quitShortcut,restoreShortcutRef.current]} onSave={value=>update({screenShortcut:value})} onRecording={setRecordingScreenShortcut}/>
+          {screen.shortcutError&&<p className="error-box" role="alert">{screen.shortcutError}</p>}
         </div>}
         {settingsTab === "updates" && <SoftwareUpdate version={version} blocked={updateBlocked} updater={updater}/>}
         {settingsTab === "history" && <HistoryView activeIds={[liveHistory.sessionId,practiceHistoryRecorder.sessionId]} onExportQuestions={id=>{setKnowledgeHistory(id);setShowSettings(false);setKnowledgeOpen(true);}}/>}

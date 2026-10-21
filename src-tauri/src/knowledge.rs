@@ -631,7 +631,7 @@ fn search_expression(query: &str) -> String {
 }
 fn shared_source(s: &Source) -> bool {
     let name = s.relative_path.to_lowercase();
-    name.contains("简历") || name.contains("resume") || name.contains("材料索引")
+    s.project.contains("共享资料") || name.contains("简历") || name.contains("resume") || name.contains("材料索引")
 }
 pub fn retrieve(
     root: &Path,
@@ -675,6 +675,9 @@ pub fn retrieve(
     Ok(values)
 }
 pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
+    lookup_with_context(root,query,"")
+}
+pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Lookup, String> {
     let snap = snapshot(root)?;
     let lib = &snap.library;
     if !lib.enabled {
@@ -688,6 +691,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
         });
     }
     let norm = normalized(query);
+    let task_norm=crate::knowledge_search::identity(query);
     let mut named: Vec<_> = lib
         .sources
         .iter()
@@ -717,7 +721,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
     let exacts: Vec<_> = qs
         .iter()
         .filter(|q| {
-            normalized(&q.question) == norm || q.aliases.iter().any(|a| normalized(a) == norm)
+            crate::knowledge_search::identity(&q.question) == task_norm || q.aliases.iter().any(|a| crate::knowledge_search::identity(a) == task_norm)
         })
         .cloned()
         .collect();
@@ -726,23 +730,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
     } else {
         None
     };
-    let mut scored: Vec<_> = qs
-        .into_iter()
-        .map(|q| {
-            let score = crate::interview_library::retrieval_score(
-                query,
-                &format!(
-                    "{} {} {}",
-                    q.question,
-                    q.aliases.join(" "),
-                    q.tags.join(" ")
-                ),
-            );
-            (q, score)
-        })
-        .filter(|(_, score)| *score > 0.25)
-        .collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let ranked = crate::knowledge_search::ranked(query,context,&qs);
     let mut projects: Vec<_> = exacts
         .iter()
         .map(|q| q.project.clone())
@@ -752,12 +740,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
     projects.dedup();
     let ambiguous = exacts.len() > 1 && projects.len() > 1;
     projects.extend(
-        scored
-            .iter()
-            .take(5)
-            .filter(|(q, _)| q.category == "项目问题")
-            .map(|(q, _)| q.project.clone())
-            .filter(|s| !s.is_empty()),
+        ranked.iter().take(5).filter(|q|q.category=="项目问题").map(|q|q.project.clone()).filter(|s|!s.is_empty()),
     );
     projects.sort();
     projects.dedup();
@@ -779,7 +762,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
     Ok(Lookup {
         enabled: true,
         exact,
-        questions: scored.into_iter().take(5).map(|(q, _)| q).collect(),
+        questions: ranked,
         passages,
         projects,
         ambiguous,
@@ -788,7 +771,7 @@ pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
 pub fn same_question(a: &Question, b: &Question) -> bool {
     a.category == b.category
         && a.project == b.project
-        && normalized(&a.question) == normalized(&b.question)
+        && crate::knowledge_search::identity(&a.question) == crate::knowledge_search::identity(&b.question)
 }
 pub fn commit_questions(
     root: &Path,

@@ -8,6 +8,11 @@ type TransitionInput = {
   relation: string;
 };
 
+export function sameQuestion(a:string,b:string):boolean {
+  const normalize=(value:string)=>value.toLowerCase().replace(/[^\p{L}\p{N}+\-=<>/\^×÷±∑√]/gu,'');
+  return !!normalize(a)&&normalize(a)===normalize(b);
+}
+
 export function questionTransition(input: TransitionInput): "first" | "new" | "revision" | null {
   if (input.action !== "show" && input.action !== "revise") return null;
   if (!input.hasActiveQuestion) return "first";

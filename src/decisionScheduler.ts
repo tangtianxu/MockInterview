@@ -1,5 +1,9 @@
 export type DecisionTranscript = {text:string;sourceId:string;isFinal:boolean;receivedAt:number};
-export type DecisionBatch = DecisionTranscript & {sourceIds:string[]};
+export type DecisionBatch = DecisionTranscript & {sourceIds:string[];turns:DecisionTranscript[]};
+export function decisionEvidenceSource(batch:DecisionBatch,ids:string[]):DecisionTranscript {
+  const selected=batch.turns.filter(t=>ids.includes(t.sourceId));
+  return selected[selected.length-1]||batch;
+}
 
 export function decisionIntervalSeconds(value:unknown):number {
   return typeof value==="number" && Number.isFinite(value) ? Math.max(2,Math.min(30,value)) : 5;
@@ -60,6 +64,6 @@ export class DecisionScheduler {
     for(const turn of turns){this.submitted.delete(turn.sourceId);this.submitted.set(turn.sourceId,turn);}
     while(this.submitted.size>80)this.submitted.delete(this.submitted.keys().next().value!);
     this.pending.clear();this.lastStarted=now;
-    return {...latest,text:turns.map(turn=>turn.text).join("\n"),sourceIds:turns.map(turn=>turn.sourceId)};
+    return {...latest,text:turns.map(turn=>turn.text).join("\n"),sourceIds:turns.map(turn=>turn.sourceId),turns};
   }
 }

@@ -32,6 +32,7 @@ pub struct PrepareInput {
     pub history_id: String,
     pub batch: usize,
     pub document_text: String,
+    pub dialogue_context: String,
 }
 impl Default for PrepareInput {
     fn default() -> Self {
@@ -44,6 +45,7 @@ impl Default for PrepareInput {
             history_id: String::new(),
             batch: 0,
             document_text: String::new(),
+            dialogue_context: String::new(),
         }
     }
 }
@@ -82,6 +84,8 @@ pub struct Match {
     pub duplicate_id: String,
     pub relation: String,
     pub reason: String,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub needs_personal_evidence: Option<bool>,
 }
 impl Default for Match {
     fn default() -> Self {
@@ -90,6 +94,7 @@ impl Default for Match {
             duplicate_id: String::new(),
             relation: "new".into(),
             reason: String::new(),
+            needs_personal_evidence: None,
         }
     }
 }
@@ -328,9 +333,11 @@ pub fn knowledge_history_questions(app: AppHandle, id: String) -> Result<Vec<Que
     ))
 }
 #[command]
-pub fn knowledge_lookup(app: AppHandle, query: String) -> Result<Lookup, String> {
+pub fn knowledge_lookup(app: AppHandle, query: String, context:Option<String>, history_session_id:Option<String>) -> Result<Lookup, String> {
     let _lock = IO.lock().map_err(|e| e.to_string())?;
-    kb::lookup(&root(&app)?, &query)
+    let result=kb::lookup_with_context(&root(&app)?, &query,context.as_deref().unwrap_or(""))?;
+    super::history_commands::record_audit(&app,history_session_id.as_deref(),"retrieval","本地混合召回",json!({"version":2,"enabled":result.enabled,"query":query,"exact":result.exact.as_ref().map(|q|&q.id),"candidateIds":result.questions.iter().map(|q|&q.id).collect::<Vec<_>>(),"passages":result.passages.iter().map(|p|json!({"sourceId":p.source_id,"locator":p.locator})).collect::<Vec<_>>() }));
+    Ok(result)
 }
 #[command]
 pub fn knowledge_prepare(
@@ -446,10 +453,9 @@ pub fn knowledge_prepare(
             (format!("{FORMAT}\n整理历史问题/候选题并判断与已有题及本批较早问题的关系。仅相同主体、相同任务、相同限制条件才 same；同主题不同任务或增加限制是 related；不明确为 uncertain。跨项目不得 same。不以相似度直接合并。每题保留原 id，补 category/project/task，口语省略主语只能由同场上下文确认，不能猜个人事实。duplicateId 只可为已有题 ID 或本批更早题 ID。JSON：{{\"items\":[{{\"id\":\"输入ID\",\"question\":\"完整问题\",\"category\":\"分类\",\"project\":\"项目，无法确认留空\",\"task\":\"任务\",\"duplicateId\":\"重复/相关题ID或空\",\"relation\":\"new/same/related/uncertain\",\"reason\":\"依据\"}}]}}"),format!("待整理问题（origins 保留原句和会话来源）：{}\n当前项目（只供定位，不证明历史就属于该项目）：{}\n已有候选题：{}",serde_json::to_string(&items).unwrap(),input.project,serde_json::to_string(&candidates.values().collect::<Vec<_>>()).unwrap()))
         }
         "match" => {
-            let lookup = kb::lookup(&base, &input.question.question)?;
-            items = lookup.questions;
-            let candidates=items.iter().map(|q|json!({"id":q.id,"question":q.question,"aliases":q.aliases,"project":q.project,"task":q.task})).collect::<Vec<_>>();
-            (format!("{FORMAT}\n判断最新问题是否与候选题同一任务。相同主体、任务、条件时 same，新增限制或要求不同为 related，资料无法确认的指代 uncertain。不能因为关键词相同就 same。JSON：{{\"id\":\"命中题目ID或空\",\"relation\":\"same/related/new/uncertain\"}}"),format!("最新问题：{}\n候选题：{}",input.question.question,serde_json::to_string(&candidates).unwrap()))
+            let lookup=kb::lookup_with_context(&base,&input.question.question,&input.dialogue_context)?;
+            items=lookup.questions;
+            (crate::knowledge_search::MATCH.to_string(),crate::knowledge_search::match_payload(&input.question.question,&input.dialogue_context,&items))
         }
         _ => return Err("不支持的知识库操作".into()),
     };
@@ -635,9 +641,12 @@ pub async fn knowledge_run(
         }
     }
     let started = Instant::now();
-    let (raw, usage) =
-        completion_json_payload(&app, &p.endpoint, &p.system, &p.user, 0.1, if p.build.is_some()||p.action=="question_document"{crate::knowledge_build::OUTPUT_LIMIT}else{6000}).await?;
-    let value = parse_json_object(&raw)?;
+    let (value,usage)=if p.action=="match" {
+        super::mvp_commands::contract_call(&app,&p.endpoint,"match_questions",&p.system,crate::knowledge_search::match_schema(),&p.user,900).await?
+    }else{
+        let (raw,usage)=completion_json_payload(&app,&p.endpoint,&p.system,&p.user,0.1,if p.build.is_some()||p.action=="question_document"{crate::knowledge_build::OUTPUT_LIMIT}else{6000}).await?;
+        (parse_json_object(&raw)?,usage)
+    };
     let (mut items, mut matches, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
     let mut organization=Vec::new();
     match p.action.as_str() {
@@ -799,22 +808,16 @@ pub async fn knowledge_run(
                     duplicate_id: target,
                     relation,
                     reason: row["reason"].as_str().unwrap_or_default().into(),
+                    ..Default::default()
                 });
                 seen.insert(q.id.clone());
                 items.push(q);
             }
         }
         "match" => {
-            let id = value["id"].as_str().unwrap_or_default();
-            let relation = value["relation"].as_str().unwrap_or("uncertain");
-            if let Some(q) = p.items.iter().find(|q| q.id == id) {
-                items.push(q.clone());
-            }
-            matches.push(Match {
-                duplicate_id: id.into(),
-                relation: relation.into(),
-                ..Default::default()
-            });
+            items=crate::knowledge_search::selection(&value,&p.items)?;
+            matches.push(Match{duplicate_id:items.first().map(|q|q.id.clone()).unwrap_or_default(),relation:value["relation"].as_str().unwrap_or("uncertain").into(),reason:value["reason"].as_str().unwrap_or_default().into(),needs_personal_evidence:value["needs_personal_evidence"].as_bool(),..Default::default()});
+            super::history_commands::record_audit(&app,p.endpoint.history_session_id.as_deref(),"retrieval","语义匹配完成",json!({"version":2,"result":value,"candidateIds":p.items.iter().map(|q|&q.id).collect::<Vec<_>>(),"elapsedMs":started.elapsed().as_millis()}));
         }
         _ => {}
     }
