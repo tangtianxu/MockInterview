@@ -182,7 +182,14 @@ pub(super) async fn contract_call(app:&AppHandle,endpoint:&ModelEndpoint,name:&s
 #[command]
 pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionInput)->Result<Decision,String>{
     let root=app.path().app_config_dir().map_err(|e|e.to_string())?.join("knowledge-library");
-    input.project_knowledge=crate::knowledge::load(&root).map_err(|e|format!("题库使用状态读取失败：{e}"))?.enabled;
+    // Library availability informs grounding, never whether speech is a task.
+    // Metadata-only vocabulary is optional; corrupt/missing library state must
+    // not disable ordinary question extraction.
+    input.term_hints.clear();
+    input.project_knowledge=crate::knowledge::load(&root).map(|lib|{
+        if lib.enabled {input.term_hints=crate::knowledge_search::recognition_terms(&crate::knowledge::questions(&root).0,&lib.sources);}
+        lib.enabled
+    }).unwrap_or(false);
     let result=super::task_harness::run(&input,|name,system,schema,user|{
         let mut endpoint=endpoint.clone();
         if name=="verify_task"{endpoint.usage_stage=Some("语义任务核验".into());}
@@ -226,7 +233,17 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     let coding = code_question.unwrap_or(false);
     if coding && question.chars().count() > 24_000 { return Err("题目文字超过24000字，请保留当前完整题目后重试".into()); }
     if let Some(context) = &practice_context { context.authorize(endpoint.api == "ollama")?; }
-    if let Some(context)=&knowledge_context {super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama")?;}
+    // Evidence may go stale between recall and streaming. Drop invalid evidence
+    // before any remote request, but never veto the accepted question itself.
+    let knowledge_context=knowledge_context.filter(|context|{
+        match super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama"){
+            Ok(())=>true,
+            Err(reason)=>{
+                super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","资料增强降级",serde_json::json!({"reason":reason,"continued":true}));
+                false
+            }
+        }
+    });
     let key_terms = key_terms.unwrap_or_default();
     let url = endpoint_url(&endpoint, "chat")?;
     if !coding && question.chars().count()>12_000 {return Err("问题超过12000字，请保留当前题干、输入输出和约束后重试".into());}
@@ -244,7 +261,7 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     } else { user };
     let system = knowledge_prompt(&system);
     let (system,user)=if let Some(context)=&knowledge_context {
-        (format!("{system}\n本次有项目知识库依据。直接回答当前项目问题；用户已确认问答中的经历可引用，原始代码/报告只证明材料记载，不能据此认定个人贡献。没有支持的信息明确列为待核实，不补造数字、动机或实验。按当前任务组织要点与依据，不机械给定义，不把可选方案说成实际实现。"),format!("{}\n当前任务：\n{user}",context.text()))
+        (format!("{system}\n{}",include_str!("../../resources/answer-evidence.txt")),format!("{}\n当前任务：\n{user}",context.text()))
     }else{(system,user)};
     let practice_reference = practice_reference.unwrap_or(false);
     let system = if practice_reference && knowledge_context.is_none() {format!("{system}\n本次是模拟面试复盘。普通解释题用 4 到 8 句给参考答案；编程任务仍须完整代码，不受句数限制。项目相关问题只给回答组织思路及需本人核实的信息；没有提供具体模型或方案时，只讲共通原理，具体实现明确标为可能的例子。不要把候选人的作答当作正确知识来源。") } else {system};

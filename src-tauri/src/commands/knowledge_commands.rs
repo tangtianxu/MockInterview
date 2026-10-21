@@ -333,11 +333,14 @@ pub fn knowledge_history_questions(app: AppHandle, id: String) -> Result<Vec<Que
     ))
 }
 #[command]
-pub fn knowledge_lookup(app: AppHandle, query: String, context:Option<String>, history_session_id:Option<String>) -> Result<Lookup, String> {
-    let _lock = IO.lock().map_err(|e| e.to_string())?;
-    let result=kb::lookup_with_context(&root(&app)?, &query,context.as_deref().unwrap_or(""))?;
-    super::history_commands::record_audit(&app,history_session_id.as_deref(),"retrieval","本地混合召回",json!({"version":2,"enabled":result.enabled,"query":query,"exact":result.exact.as_ref().map(|q|&q.id),"candidateIds":result.questions.iter().map(|q|&q.id).collect::<Vec<_>>(),"passages":result.passages.iter().map(|p|json!({"sourceId":p.source_id,"locator":p.locator})).collect::<Vec<_>>() }));
+pub async fn knowledge_lookup(app: AppHandle, query: String, context:Option<String>, history_session_id:Option<String>) -> Result<Lookup, String> {
+    // Slow files/indexes must not occupy the command event loop while the page
+    // proceeds with a normal answer after its evidence deadline.
+    tauri::async_runtime::spawn_blocking(move||{
+    let result={let _lock=IO.lock().map_err(|e|e.to_string())?;kb::lookup_with_context(&root(&app)?, &query,context.as_deref().unwrap_or(""))?};
+    super::history_commands::record_audit(&app,history_session_id.as_deref(),"retrieval","本地混合召回",json!({"version":3,"enabled":result.enabled,"query":query,"exact":result.exact.as_ref().map(|q|&q.id),"candidateIds":result.questions.iter().map(|q|&q.id).collect::<Vec<_>>(),"passages":result.passages.iter().map(|p|json!({"sourceId":p.source_id,"locator":p.locator})).collect::<Vec<_>>(),"note":result.note }));
     Ok(result)
+    }).await.map_err(|e|e.to_string())?
 }
 #[command]
 pub fn knowledge_prepare(

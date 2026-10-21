@@ -157,15 +157,16 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     setReference({text:"",loading:true,error:""});
     try {
       if(currentQuestion.bankQuestion){
-        const snapshot=await readKnowledgeSnapshot();
-        const bank=snapshot.questions.find(q=>q.id===currentQuestion.bankQuestion?.id&&q.status==="confirmed"&&q.answer===currentQuestion.bankQuestion?.answer);
-        if(!bank)throw Error("题库答案或资料已变更，请核对后再练习。");
-        if(stillCurrent()){current.text=[bank.answer,bank.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge",questionId:bank.id},current.id);}return;
+        try{
+          const snapshot=await readKnowledgeSnapshot();if(!stillCurrent())return;
+          const bank=snapshot.questions.find(q=>q.id===currentQuestion.bankQuestion?.id&&q.status==="confirmed"&&q.answer===currentQuestion.bankQuestion?.answer);
+          if(bank){current.text=[bank.answer,bank.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge",questionId:bank.id},current.id);return;}
+        }catch(cause){history.record("retrieval","标准回答暂不可用，继续生成参考",{stage:"retrieval",reason:String(cause)});}
       }
       const background=currentQuestion.background || currentBackground();
       let knowledgeContext:KnowledgeContext|undefined;
-      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,await history.endpoint(model,"参考检索",stillCurrent),stillCurrent);if(!stillCurrent())return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
-      const consentToSendResume=knowledgeContext ? false : await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
+      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,await history.endpoint(model,"参考检索",stillCurrent),stillCurrent);if(!stillCurrent())return;if(bank.note)history.record("retrieval",bank.note,{stage:"retrieval"});if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
+      const consentToSendResume=await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
       if(!stillCurrent())return;
       if(local)await invoke("start_local_service",{service:"ollama"});
       if(!stillCurrent())return;
@@ -183,7 +184,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       referenceStopsRef.current.push(stop);
       await invoke("mvp_answer",{endpoint:await history.endpoint(model,"参考生成",stillCurrent),requestId:current.id,question:currentQuestion.question,
         focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
-        knowledgeContext,practiceContext:{...background,resumeText:knowledgeContext?"":background.resumeText,resumeAnalysis:knowledgeContext?"":background.resumeAnalysis,preferences:local ? background.preferences : "",consentToSendResume}});
+        knowledgeContext,practiceContext:{...background,preferences:local ? background.preferences : "",consentToSendResume}});
       if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
       if(stillCurrent())history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:local?"local":"api"},current.id);
     }catch(cause){if(stillCurrent()){

@@ -27,6 +27,7 @@ import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, providerDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
+import {practiceBackground} from './practiceSession';
 import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 import {usePanelLayout} from "./usePanelLayout";
 import {TestGuide} from "./TestGuide";
@@ -37,7 +38,7 @@ type Api = ModelApi;
 type SttMode = "local" | "api";
 type SttApiProvider = "groq_whisper" | "deepgram";
 type Status = "idle" | "listening" | "deciding" | "generating" | "error";
-type DisplaySource = AnswerSource | "saved";
+type DisplaySource = AnswerSource | "saved" | "guide";
 type ModelEndpoint = ModelConfig & { credentialSlot: string };
 type OllamaRuntime = { executable: string | null; configuredExecutable: string | null;
   configFile: string; modelsDirectory: string | null; connected: boolean };
@@ -376,6 +377,7 @@ function Main() {
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [decisionMs, setDecisionMs] = useState<number | null>(null);
   const [answerSource, setAnswerSource] = useState<DisplaySource|null>(null);
+  const answerSourceRef=useRef<DisplaySource|null>(null);answerSourceRef.current=answerSource;
   const [apiPending, setApiPending] = useState(false);
   const [parallelModels, setParallelModels] = useState<string[]>([]);
   const [answerMs, setAnswerMs] = useState<number | null>(null);
@@ -591,7 +593,7 @@ function Main() {
     if (container && followTranscriptRef.current) container.scrollTop=segments.length || partial || micPartial ? container.scrollHeight : 0;
   }, [segments, partial, micPartial, workspaceMode]);
   useEffect(() => {
-    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:knowledgeAnswerRef.current?!!detail:answerSource!=="saved"};
+    const state: OverlayState = {question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:answerSource!=="guide"&&(knowledgeAnswerRef.current?!!detail:answerSource!=="saved")};
     void emit("mvp_ui_state", codeOverlayRef.current || state);
   }, [question, hint, status, locked, uncertainTerms, keyTerms, detail, detailLoading, answerSource,answerView,screen.answer,screen.phase,screen.error,workspaceMode]);
 
@@ -769,7 +771,7 @@ function Main() {
           }
           return names;
         },
-        test:current=>invoke("mvp_test_model_endpoint",{endpoint:endpoint(current,stage,shared),structured:shared||stage==="decision"||knowledgeEnabledRef.current})
+        test:current=>invoke("mvp_test_model_endpoint",{endpoint:endpoint(current,stage,shared),structured:shared||stage==="decision"})
       });
       if(epoch!==connectionEpochRef.current)return;
       if(result.config.model!==config.model)commitModelConfig(stage,{model:result.config.model});
@@ -1027,12 +1029,24 @@ function Main() {
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
     liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
-    // Accepted tasks advance immediately, including during a retrieval consent
-    // dialog. A later transcript must not resolve against an older shown answer.
+    // Accepted tasks advance even while evidence is loading. A later transcript
+    // must not resolve against an older shown answer.
     const context=rememberQuestion(questionHistoryRef.current,nextQuestion);
     questionHistoryRef.current=context.history;
     questionRef.current=nextQuestion;
     knowledgeAnswerRef.current=false;
+    savedIntroductionRef.current=false;
+    answerStartedRef.current=performance.now();
+    setError("");setStatus("generating");setApiPending(false);
+    setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
+    detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
+    pendingDisplayRef.current=null;pendingHintRef.current="";
+    // A newly accepted task replaces the old answer immediately. This local
+    // outline remains available if retrieval or the model service fails.
+    if(!lockedRef.current||asrAt===null){
+      setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);setAnswerSource("guide");
+      publishHint("回答思路：先直接回应当前问题，再说明依据和关键步骤。涉及个人经历时，按项目目标、本人工作、技术方法和结果组织；只使用已确认的事实，尚不清楚的细节明确留待补充。",true);
+    }
     let knowledgeContext:KnowledgeContext|undefined;
     const stillCurrent=()=>answerRequestRef.current===requestId&&!softwareUpdatingRef.current;
     {
@@ -1040,8 +1054,7 @@ function Main() {
       try{
         const result=await knowledgeForQuestion(nextQuestion,await liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配",stillCurrent),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
         if(!stillCurrent())return;
-        if(result.missingProject){setError("项目指代不明确，请在“面试准备”的生成与使用设置中指定优先使用的项目，或在问题框写明项目名称。");setStatus("error");return;}
-        if(result.missingEvidence){setError("没有检索到这个项目的可靠资料。请先导入项目资料，或编写并确认该题的标准回答。");setStatus("error");return;}
+        if(result.note){logDiagnostic("资料增强降级",result.note);liveHistory.record("retrieval",result.note,{query:nextQuestion,continued:true});}
         if(result.exact){
           const startedAt=performance.now();knowledgeAnswerRef.current=true;
           detailRequestRef.current="";setDetail(result.exact.explanation);setDetailLoading(false);setShowDetail(false);
@@ -1053,13 +1066,13 @@ function Main() {
           setStatus(runningRef.current?"listening":"idle");return;
         }
         knowledgeContext=result.context;knowledgeAnswerRef.current=!!knowledgeContext;
-      }catch(cause){if(stillCurrent()){setError(`题库回答未继续：${String(cause)}`);setStatus("error");}return;}
+      }catch(cause){if(!stillCurrent())return;logDiagnostic("资料增强降级",String(cause));liveHistory.record("retrieval",String(cause),{query:nextQuestion,continued:true});}
     }
     const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
     const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
       source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
     const race=new AnswerRace(requests);answerRaceRef.current=race;
-    answerStartedRef.current=performance.now();if(!visibleHintRef.current)setAnswerSource(null);setApiPending(parallel);
+    if(!visibleHintRef.current)setAnswerSource(null);setApiPending(parallel);
     setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
     pendingDisplayRef.current=null;pendingHintRef.current="";
@@ -1082,12 +1095,19 @@ function Main() {
         await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(endpoint(config,"answer"),"回答生成",()=>answerRaceRef.current===race),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
           knowledgeContext,
+          practiceContext:{...practiceBackground({scope:"comprehensive",difficulty:"medium",role:settings.targetRole,
+            topics:settings.focusTopics,domain:settings.domain,local:config.api==="ollama",resume:resumeRef.current,analysis:resumeAnalysisRef.current}),consentToSendResume:true},
           answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
       }catch(cause){if(answerRaceRef.current===race)finishAnswer(id,String(cause));}
     }));
-  }, [cancelAnswer,finishAnswer,logDiagnostic,showAnswerSnapshot]);
+  }, [cancelAnswer,finishAnswer,logDiagnostic,showAnswerSnapshot,publishHint]);
 
   const showSelfIntroduction = useCallback((sourceId:string,asrAt:number|null) => {
+    if(!settingsRef.current.selfIntroduction.trim()){
+      activeSourceRef.current=sourceId;
+      void startAnswer("请进行自我介绍",[],[],[],[],"new",asrAt);
+      return;
+    }
     knowledgeAnswerRef.current=false;
     cancelAnswer();savedIntroductionRef.current=true;setError("");
     detailRequestRef.current="";setDetail("");setDetailLoading(false);setShowDetail(false);
@@ -1107,7 +1127,7 @@ function Main() {
       startedAt,asrAt,source:"saved"},text);
     setStatus(runningRef.current ? "listening" : "idle");
     logDiagnostic("显示自我介绍","直接显示本机保存稿，未调用回答模型");
-  }, [cancelAnswer,showAnswerSnapshot,logDiagnostic]);
+  }, [cancelAnswer,showAnswerSnapshot,logDiagnostic,startAnswer]);
 
   const submitEditedQuestion = useCallback(() => {
     if(updater.busy)return;
@@ -1129,7 +1149,7 @@ function Main() {
   const loadDetail = useCallback(async () => {
     const question=visibleQuestionRef.current;
     const summary=visibleHintRef.current;
-    if (softwareUpdatingRef.current || savedIntroductionRef.current || knowledgeAnswerRef.current || !question || !summary || detailRequestRef.current ||
+    if (softwareUpdatingRef.current || savedIntroductionRef.current || knowledgeAnswerRef.current || answerSourceRef.current==="guide" || !question || !summary || detailRequestRef.current ||
         (detailRef.current && !detailRef.current.startsWith("原理解释失败："))) return;
     const requestId=crypto.randomUUID();detailRequestRef.current=requestId;
     setDetail("");setDetailLoading(true);
@@ -1570,7 +1590,7 @@ function Main() {
           onChange={e=>{if(e.target.value)updateStage(stage,{model:e.target.value,modelSelection:"manual"});}} disabled={busy}>
           <option value="">手动填写 / 未在列表中</option>{choices.map(model=><option key={model} value={model}>{model}</option>)}</select></label>}
         <button className="text-link" disabled={busy || !config.baseUrl.trim()} onClick={()=>void refreshModels(stage,true)}>刷新模型列表</button>
-        <p className="setting-help">兼容服务需要支持聊天接口；模拟练习的出题与评价需要 JSON 输出，语义判别与题库匹配需要 Tool Calling（函数调用）。连接检测会检查当前需要的接口能力。本地 Ollama 使用结构化输出。</p>
+        <p className="setting-help">兼容服务需要支持聊天接口；模拟练习的出题与评价需要 JSON 输出，语音问题识别需要 Tool Calling（函数调用）；题库只为回答补充依据，不再单独调用匹配模型。连接检测会检查当前需要的接口能力。本地 Ollama 使用结构化输出。</p>
       </div>}
     </div>;
   };
@@ -1702,16 +1722,16 @@ function Main() {
               onClick={()=>{setQuestionDraft(question);setEditingQuestion(true);}}><MathText text={question || "点击输入问题，或等待转录识别…"}/></button>}
           {keyTerms.length>0 && <div className="term-list" aria-label="技术关键词">{keyTerms.map(term=><span className="term-chip" key={term}>{term}</span>)}</div>}
           {uncertainTerms.length>0 && <div className="term-warning">可能听错的术语：{uncertainTerms.join("、")}</div>}
-          <div className="answer-label answer-label-space">{answerSource==="saved" ? (knowledgeAnswerRef.current?"题库回答":"自我介绍稿") : /(^|\n) {0,3}(`{3,}|~{3,})/.test(hint)?"代码与说明":"定义与原理"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
+          <div className="answer-label answer-label-space">{answerSource==="saved" ? (knowledgeAnswerRef.current?"题库回答":"自我介绍稿") : /(^|\n) {0,3}(`{3,}|~{3,})/.test(hint)?"代码与说明":"回答提示"} <span>{status==="generating"&&<span className="inline-loading"><RefreshCw size={13}/> 生成中</span>}</span></div>
           <div className="answer-card">{hint?<div className="answer-text"><AnswerText text={hint}/></div>:<div className="answer-placeholder"><span className="answer-placeholder-icon"><Sparkles size={22}/></span><strong>提示将在这里出现</strong><p>先看概念定义，再看具体工作原理。</p></div>}</div>
-          {hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <button className="detail-btn" onClick={()=>{
+          {hint && answerSource!=="guide" && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <button className="detail-btn" onClick={()=>{
             if (!showDetail && (!detail || detail.startsWith("原理解释失败：")) && !detailLoading) void loadDetail();
             setShowDetail(!showDetail);
           }}><ChevronDown size={15} className={showDetail?"rotated":""}/>{showDetail?"收起细节":"展开细节"}</button>}
-          {showDetail && hint && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
+          {showDetail && hint && answerSource!=="guide" && (knowledgeAnswerRef.current?!!detail:answerSource!=="saved") && <div className="detail-card"><b>进一步解释</b><p><MathText text={detailLoading?"正在补充细节…":detail || "等待补充细节…"}/></p>
             <div className="detail-timings">判别 {decisionMs??"—"} ms · 模型首字 {answerMs??"—"} ms · 首条可见 {visibleMs??"—"} ms · 完成 {completeMs??"—"} ms · 转录至完整 {transcriptToCompleteMs??"—"} ms</div></div>}
           </div>
-        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="saved" ? (knowledgeAnswerRef.current?"题库标准回答":"已保存的自我介绍") : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div></>}
+        <div className="answer-footer"><span><Check size={14}/> {answerSource===null ? "等待回答" : answerSource==="guide" ? "答题思路" : answerSource==="saved" ? (knowledgeAnswerRef.current?"题库标准回答":"已保存的自我介绍") : answerSource === "local" ? "本地回答" : "API 回答"}{apiPending ? " · API 完善中" : ""}</span><span>判别 {decisionMs??"—"} ms</span><span>提示可见 {visibleMs??"—"} ms</span><span title="从触发本次判别的转录更新，到这次回答完整生成">转录→完整 {transcriptToCompleteMs??"—"} ms</span></div></>}
       </section>
       {panelLayout.dividers}
     </main>}
@@ -1781,7 +1801,7 @@ function Main() {
           <div className="setup-actions"><button className="download-btn" disabled={running || practiceActive || practiceWorking || startingService} onClick={()=>void chooseSharedResume()}>
             {settings.resumePath?"更换简历":"选择简历"}</button>
             {settings.resumePath && <button className="download-btn" disabled={running || practiceActive || practiceWorking || startingService} onClick={clearResume}>移除简历</button>}</div>
-          {settings.resumePath && <p className="setting-help">已保存路径：{settings.resumePath}。{resumeAnalysis?"本地分析已保存；只取简历原文中出现的术语作本地消歧。":"尚未分析；在练习页使用本地 Ollama 分析后可供实时提示使用。"}</p>}
+          {settings.resumePath && <p className="setting-help">已保存路径：{settings.resumePath}。{resumeAnalysis?"分析已保存；生成经历或项目回答时可结合简历原文核对事实。":"简历原文可直接供回答参考；分析为可选操作，可使用当前 API 或本地模型。"}</p>}
           {resumeError && <p className="setting-help" role="alert">{resumeError}</p>}
           <p className="setting-help">简历原文不用于实时技术题答案。外部判别、回答及语音 API 默认不会收到简历提取内容。</p>
         </div>
@@ -1794,7 +1814,7 @@ function Main() {
           <label>自我介绍稿（自动保存）<textarea aria-label="自我介绍稿" value={settings.selfIntroduction} maxLength={4000} rows={7}
             placeholder="粘贴你准备好的自我介绍。请填写真实经历；可按教育背景、研究或项目、岗位匹配度组织。"
             onChange={e=>update({selfIntroduction:e.target.value})}/></label>
-          <p className="setting-help">面试官要求你进行自我介绍时，直接在提示区显示这份稿子。保存稿不交给模型改写，也不加入其他问题的生成上下文。留空时提示你填写，最多 4000 字。</p>
+          <p className="setting-help">面试官要求你进行自我介绍时，直接在提示区显示这份稿子。保存稿不交给模型改写，也不加入其他问题的生成上下文。留空时结合已填写资料生成参考思路，最多 4000 字。</p>
         </div>
         <div className="setting-group"><div className="setting-heading"><Pencil size={18}/> 回答要求</div>
           <p className="setting-help">自定义回答的表达方式、简短程度和关注方向；只影响后续回答及“展开细节”。留空使用内置要求。</p>

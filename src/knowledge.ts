@@ -11,7 +11,7 @@ export type KnowledgeSnapshot={diagnosticId?:string;root:string;library:Knowledg
 export type KnowledgeMatch={questionId:string;duplicateId:string;relation:string;reason:string;needsPersonalEvidence?:boolean};
 export type KnowledgeResult={items:BankQuestion[];matches:KnowledgeMatch[];warnings:string[];model:string;elapsedMs:number;usage:any;organization?:ProjectProposal[]};
 export type KnowledgePassage={sourceId:string;hash:string;project:string;path:string;locator:string;text:string};
-export type KnowledgeLookup={enabled:boolean;exact:BankQuestion|null;questions:BankQuestion[];passages:KnowledgePassage[];projects:string[];ambiguous?:boolean};
+export type KnowledgeLookup={enabled:boolean;exact:BankQuestion|null;questions:BankQuestion[];passages:KnowledgePassage[];projects:string[];ambiguous?:boolean;note?:string};
 export type KnowledgeContext={questions:BankQuestion[];passages:KnowledgePassage[];consent:boolean};
 export type KnowledgePlan={token:string;action:string;model:string;destination:string;characters:number;files:string[];preview:string;batch:number;totalBatches:number};
 export type KnowledgeBuildPlan={plans:KnowledgePlan[];characters:number;files:string[];preview:string;model:string;destination:string};
@@ -31,36 +31,31 @@ export function effectiveExports(items:BankQuestion[],matches:KnowledgeMatch[],b
   merged.set(key,p);
  }return [...merged.values()];
 }
-// Enabling the library authorizes automatic runtime matching and use of relevant
-// evidence with the selected model service. Draft generation remains separate.
-export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean,conversation=''):Promise<{exact?:BankQuestion;context?:KnowledgeContext;missingProject?:boolean;missingEvidence?:boolean}>{
- const lookup=await invoke<KnowledgeLookup>('knowledge_lookup',{query,context:conversation,historySessionId:endpoint.historySessionId});
- if(!stillCurrent()||!lookup.enabled)return {};
- if(lookup.exact)return {exact:lookup.exact};
- let selected:BankQuestion[]=[];let passages=lookup.passages;
- {
-  const plan=await invoke<KnowledgePlan>('knowledge_prepare',{endpoint,input:{action:'match',question:{...emptyQuestion(),question:query},dialogueContext:conversation}});
-  if(!stillCurrent()){await invoke('knowledge_discard_plan',{token:plan.token});return {};}
-  const result=await invoke<KnowledgeResult>('knowledge_run',{token:plan.token,consent:true});if(!stillCurrent())return {};
-  const relation=result.matches[0]?.relation;
-  if(relation==='ambiguous')return {missingProject:true};
-  selected=result.items.slice(0,5);
-  if(relation==='same'&&selected[0]){
-   const matched=selected[0];const fresh=await readKnowledgeSnapshot();if(!stillCurrent())return {};
-   const current=fresh.questions.find(q=>q.id===matched.id&&q.status==='confirmed'&&q.question===matched.question&&q.project===matched.project&&q.task===matched.task&&q.answer===matched.answer&&q.explanation===matched.explanation);
-   if(!current)throw Error('题库在匹配期间已更新，请重新提交问题。');return {exact:current};
-  }
-  if(relation==='new'){
-   const needsEvidence=result.matches[0]?.needsPersonalEvidence;
-   if(typeof needsEvidence!=='boolean')throw Error('语义检索未判断问题是否需要个人资料依据。');
-   if(!needsEvidence)return {};
-   if(!passages.length)return {missingEvidence:true};
-   if(lookup.projects.length>1)return {missingProject:true};
-  }
-  const project=selected.find(q=>q.project)?.project;
-  if(project){const scoped=await invoke<KnowledgeLookup>('knowledge_lookup',{query:`${project} ${query}`,context:'',historySessionId:endpoint.historySessionId});if(!stillCurrent())return {};passages=scoped.passages.filter(p=>p.project===project);}
- }
- if(!selected.length&&!passages.length)return {missingEvidence:true};
- const context={questions:selected,passages:passages.slice(0,5),consent:false};
- if(!stillCurrent())return {};context.consent=true;return {context};
+// Retrieval supplies evidence; it never decides whether an accepted task deserves
+// an answer. One answer request reasons over the current task and this bounded
+// context, without a separate API equivalence/permission gate.
+export function answerEvidence(lookup:KnowledgeLookup):KnowledgeContext|undefined {
+ const eligible=lookup.questions.filter(q=>q.status==='confirmed'&&q.answer.trim());
+ const ordered=eligible.slice(0,3);
+ const projects=new Set(ordered.map(q=>q.project));
+ for(const q of eligible){if(ordered.length>=5)break;if(!projects.has(q.project)){ordered.push(q);projects.add(q.project);}}
+ for(const q of eligible){if(ordered.length>=5)break;if(!ordered.some(v=>v.id===q.id))ordered.push(q);}
+ let remaining=38000;
+ const withinBudget=<T,>(values:T[])=>values.filter(value=>{const size=[...JSON.stringify(value)].length;if(size>remaining)return false;remaining-=size;return true;});
+ const questions=withinBudget(ordered),passages=withinBudget(lookup.passages.slice(0,5));
+ return questions.length||passages.length?{questions,passages,consent:true}:undefined;
+}
+export const RETRIEVAL_DEADLINE_MS=1200;
+export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean,conversation=''):Promise<{exact?:BankQuestion;context?:KnowledgeContext;note?:string}>{
+ let timer:ReturnType<typeof setTimeout>|undefined;
+ try{
+  const lookup=await Promise.race([
+   invoke<KnowledgeLookup>('knowledge_lookup',{query,context:conversation,historySessionId:endpoint.historySessionId}),
+   new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('本地资料读取超时')),RETRIEVAL_DEADLINE_MS);})
+  ]);
+  if(!stillCurrent()||!lookup.enabled)return {};
+  if(lookup.exact?.status==='confirmed'&&lookup.exact.answer.trim())return {exact:lookup.exact};
+  return {context:answerEvidence(lookup),note:lookup.note||undefined};
+ }catch(cause){return stillCurrent()?{note:`资料增强暂不可用，继续生成回答：${String(cause)}`}:{};}
+ finally{if(timer)clearTimeout(timer);}
 }

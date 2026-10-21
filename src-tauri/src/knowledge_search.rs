@@ -2,6 +2,29 @@
 //! The API then judges task equivalence; lexical scores never authorize reuse.
 use crate::knowledge::Question;
 use std::collections::{HashMap, HashSet};
+/// A bounded glossary from local metadata, never generated answers or personal
+/// facts. The extraction model may use it to resolve noisy spoken terminology.
+pub fn recognition_terms(questions:&[Question],sources:&[crate::knowledge::Source])->Vec<String>{
+    let mut counts=HashMap::<String,(usize,usize)>::new();
+    for text in questions.iter().filter(|q|q.status=="confirmed").flat_map(|q|std::iter::once(q.question.as_str()).chain(q.aliases.iter().map(String::as_str)).chain(q.tags.iter().map(String::as_str)))
+        .map(|text|(text,true)).chain(sources.iter().filter(|s|s.status=="ready").map(|s|(s.relative_path.as_str(),false))){
+        let (text,from_question)=text;
+        let mut token=String::new();let mut seen=HashSet::new();
+        let mut flush=|token:&mut String|{
+            let value=token.trim_matches(|c:char|"._+-".contains(c));
+            if (2..=40).contains(&value.chars().count())&&value.chars().any(|c|c.is_ascii_alphabetic()||('\u{0370}'..='\u{03ff}').contains(&c)){
+                seen.insert(value.to_string());
+            }
+            token.clear();
+        };
+        for c in text.chars(){if c.is_ascii_alphanumeric()||"._+-".contains(c)||('\u{0370}'..='\u{03ff}').contains(&c){token.push(c);}else{flush(&mut token);}}
+        flush(&mut token);
+        for term in seen{let count=counts.entry(term).or_default();if from_question{count.0+=1;}else{count.1+=1;}}
+    }
+    let mut terms:Vec<_>=counts.into_iter().collect();terms.sort_by(|a,b|b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut remaining=800;
+    terms.into_iter().filter_map(|(term,_)|{let size=term.chars().count();if size>remaining{return None;}remaining-=size;Some(term)}).take(48).collect()
+}
 pub fn identity(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric() || "+-=<>/^×÷±∑√".contains(*c))
@@ -195,6 +218,13 @@ pub fn selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recognition_vocabulary_is_bounded_and_contains_metadata_not_answer_facts(){
+        let qs=vec![Question{question:"PPO 与 GAE 的关系".into(),answer:"private_secret_answer".into(),status:"confirmed".into(),..Default::default()},Question{question:"draft_only_term".into(),status:"draft".into(),..Default::default()}];
+        let terms=recognition_terms(&qs,&[]);assert!(terms.contains(&"PPO".into()));assert!(terms.contains(&"GAE".into()));assert!(!terms.iter().any(|s|s.contains("private_secret")||s.contains("draft_only")));
+        let sources=(0..100).map(|i|crate::knowledge::Source{relative_path:format!("技术资料/Method{i}/报告.pdf"),status:"ready".into(),..Default::default()}).collect::<Vec<_>>();
+        let terms=recognition_terms(&qs,&sources);assert!(terms.len()<=48);assert!(terms.iter().map(|s|s.chars().count()).sum::<usize>()<=800);assert!(terms.contains(&"PPO".into()));assert!(terms.contains(&"GAE".into()));
+    }
     #[test]
     fn no_match_requires_an_explicit_personal_evidence_classification() {
         assert!(selection(&serde_json::json!({"relation":"new","ids":[]}), &[]).is_err());

@@ -169,6 +169,7 @@ pub struct Lookup {
     pub passages: Vec<Passage>,
     pub projects: Vec<String>,
     pub ambiguous: bool,
+    pub note: String,
 }
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -688,6 +689,7 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
             passages: Vec::new(),
             projects: Vec::new(),
             ambiguous: false,
+            note: String::new(),
         });
     }
     let norm = normalized(query);
@@ -704,11 +706,9 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
         .collect();
     named.sort();
     named.dedup();
-    let project = if named.len() == 1 {
-        named[0].as_str()
-    } else {
-        &lib.active_project
-    };
+    // An explicitly named single project scopes facts. A saved *preference* is
+    // only a ranking hint: it must not hide other projects in an overview.
+    let project=if named.len()==1 {named[0].as_str()}else{""};
     let qs: Vec<_> = snap
         .questions
         .iter()
@@ -730,7 +730,8 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
     } else {
         None
     };
-    let ranked = crate::knowledge_search::ranked(query,context,&qs);
+    let background=format!("{context}\n{}",lib.active_project);
+    let ranked=crate::knowledge_search::ranked(query,&background,&qs);
     let mut projects: Vec<_> = exacts
         .iter()
         .map(|q| q.project.clone())
@@ -744,7 +745,12 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
     );
     projects.sort();
     projects.dedup();
-    let passages = retrieve(root, lib, query, project)?;
+    // A derived full-text index failure must not discard the independently
+    // readable, confirmed question bank or prevent ordinary generation.
+    let (passages,note)=match retrieve(root,lib,query,project){
+        Ok(values)=>(values,String::new()),
+        Err(reason)=>(Vec::new(),format!("资料全文检索暂不可用，仍使用已采用问答：{reason}")),
+    };
     if project.is_empty() {
         projects.extend(
             passages
@@ -766,6 +772,7 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
         passages,
         projects,
         ambiguous,
+        note,
     })
 }
 pub fn same_question(a: &Question, b: &Question) -> bool {
@@ -906,6 +913,25 @@ pub fn history_questions(value: &serde_json::Value) -> Vec<Question> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_project_preference_never_hides_other_projects_in_overviews(){
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        save_library(root,&Library{enabled:true,active_project:"产线联调".into(),..Default::default()}).unwrap();
+        for project in ["产线联调","巡检导航"]{save_question(root,Question{id:Uuid::new_v4().to_string(),category:"项目问题".into(),project:project.into(),question:format!("{project}个人职责"),answer:format!("实习期间参与{project}验证"),status:"confirmed".into(),..Default::default()}).unwrap();}
+        for query in ["介绍一下实习期间的工作","比较产线联调与巡检导航"]{let value=lookup(root,query).unwrap();assert_eq!(value.questions.len(),2);}
+        let scoped=lookup(root,"介绍巡检导航的个人职责").unwrap();assert_eq!(scoped.questions.len(),1);assert_eq!(scoped.questions[0].project,"巡检导航");
+    }
+    #[test]
+    fn broken_derived_index_keeps_confirmed_answers_available() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        save_library(root,&Library{enabled:true,..Default::default()}).unwrap();
+        let q=Question{id:Uuid::new_v4().to_string(),category:"项目问题".into(),project:"A".into(),question:"项目分工".into(),answer:"实习期间负责联调验证".into(),status:"confirmed".into(),..Default::default()};
+        save_question(root,q.clone()).unwrap();
+        fs::write(root.join("index.sqlite"),b"corrupt derived index").unwrap();
+        let value=lookup(root,"介绍实习期间的工作").unwrap();
+        assert!(value.enabled);assert_eq!(value.questions[0].id,q.id);assert!(value.passages.is_empty());assert!(!value.note.is_empty());
+        assert_eq!(questions(root).0[0].answer,q.answer);
+    }
     #[test]
     fn single_project_import_keeps_nested_code_and_refresh_in_the_project() {
         let temp=tempfile::tempdir().unwrap();let root=temp.path().join("library");

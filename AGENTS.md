@@ -9,3 +9,5 @@
 - Keep profiles, source text, generated questions, backups and diagnostics in ignored local outputs. Do not send private material to a model without authorization for that specific payload. Recovery does not require paid model calls, automatic answer confirmation, or enabling pending drafts.
 - The public README describes the simulation practice mode only, as requested by the user.
 - Runtime use of an enabled question bank is automatic: matching may send the current question, recent dialogue and candidate metadata to the selected model; synthesis may send selected answers and related passages. The user has authorized this workflow. Explain that scope in the library usage settings and preserve the disable control. Manual analysis/build operations retain their send previews.
+
+- An accepted question must proceed to an answer. Runtime library retrieval supplies optional evidence, never a same/related/ambiguous eligibility gate. Preserve fallback on empty, unavailable, stale or slow retrieval; broad questions may use multiple clearly labeled projects. Question extraction must also remain independent of library availability.
