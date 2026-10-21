@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
-import { open as choosePath, save as chooseBackupPath, ask } from "@tauri-apps/plugin-dialog";
+import { open as choosePath, save as chooseBackupPath, ask } from "./inAppActions";
 import { isRegistered, register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { exit } from "@tauri-apps/plugin-process";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -17,6 +17,7 @@ import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
+import {InAppActions} from "./ActionPanel";
 import {useHistoryRecorder} from "./history";
 import {HistoryView} from "./HistoryView";
 import {KnowledgeView} from "./KnowledgeView";
@@ -358,6 +359,7 @@ function Main() {
   useEffect(()=>{void readKnowledgeSnapshot().then(s=>setKnowledgeEnabled(s.library.enabled)).catch(cause=>setError(`面试准备状态读取失败：${String(cause)}`));},[]);
   const {recorder:liveHistory,error:historyError}=useHistoryRecorder();
   const [historyNativeError,setHistoryNativeError]=useState("");
+  const [actionNotice,setActionNotice]=useState("");
   const {recorder:practiceHistoryRecorder,error:practiceHistoryError}=useHistoryRecorder();
   const [showDetail, setShowDetail] = useState(false);
   const [download, setDownload] = useState("");
@@ -1021,6 +1023,7 @@ function Main() {
     if(softwareUpdatingRef.current || modelRemovalRef.current)return;
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
+    setActionNotice("");
     const settings=settingsRef.current;
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
@@ -1036,8 +1039,9 @@ function Main() {
     {
       setStatus("generating");
       try{
-        const result=await knowledgeForQuestion(nextQuestion,liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配"),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
+        const result=await knowledgeForQuestion(nextQuestion,await liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配",stillCurrent),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
         if(!stillCurrent())return;
+        if(result.cancelled){answerRequestRef.current="";setError("");setActionNotice("已跳过本次题库匹配，相关内容未发送。");setStatus(runningRef.current?"listening":"idle");return;}
         if(result.missingProject){setError("项目指代不明确，请在“面试准备”的生成与使用设置中指定优先使用的项目，或在问题框写明项目名称。");setStatus("error");return;}
         if(result.missingEvidence){setError("没有检索到这个项目的可靠资料。请先导入项目资料，或编写并确认该题的标准回答。");setStatus("error");return;}
         if(result.exact){
@@ -1077,7 +1081,7 @@ function Main() {
         }
         if(answerRaceRef.current!==race)return;
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
-        await invoke("mvp_answer",{endpoint:liveHistory.endpoint(endpoint(config,"answer"),"回答生成"),requestId:id,
+        await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(endpoint(config,"answer"),"回答生成",()=>answerRaceRef.current===race),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
           knowledgeContext,
           answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
@@ -1134,7 +1138,7 @@ function Main() {
     try {
       const background=topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
         settingsRef.current.answer.api==="ollama");
-      const explanation=await invoke<string>("mvp_explain",{endpoint:liveHistory.endpoint(endpoint(settingsRef.current.answer,"answer"),"补充解释"),
+      const explanation=await invoke<string>("mvp_explain",{endpoint:await liveHistory.endpoint(endpoint(settingsRef.current.answer,"answer"),"补充解释",()=>detailRequestRef.current===requestId&&visibleQuestionRef.current===question),
         question,keyTerms:visibleKeyTermsRef.current,summary,
         answerInstructions:[settingsRef.current.answerInstructions,background && `术语背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
       liveHistory.record("detail",explanation,{question});
@@ -1168,7 +1172,7 @@ function Main() {
     try {
       const turns=taskWindow(segmentsRef.current,[partialRef.current,micPartialRef.current],pending.turns,settingsRef.current.mode);
       const decision = await invoke<Decision>("mvp_decide", {
-        endpoint:liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别"),
+        endpoint:await liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别",()=>runningRef.current&&epoch===sessionEpochRef.current),
         input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,
           projectKnowledge:knowledgeEnabledRef.current,
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
@@ -1624,6 +1628,8 @@ function Main() {
           <button className="window-action close" aria-label="关闭程序" title="关闭程序" onClick={()=>void quitRef.current()}><X size={17}/></button>
         </div>
     </header>
+    <InAppActions/>
+    {actionNotice&&<p className="inline-operation-note" role="status">{actionNotice}<button aria-label="收起操作提示" onClick={()=>setActionNotice("")}>×</button></p>}
     {(historyError || practiceHistoryError || historyNativeError) && <p className="error-box history-save-error" role="alert">{historyError || practiceHistoryError || historyNativeError}</p>}
     {error&&<p className="error-box history-save-error" role="alert">{error}</p>}
     {workspaceMode==="practice" ? <PracticeView model={endpoint(settings.answer,"answer")}

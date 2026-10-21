@@ -2,9 +2,11 @@ import {test} from 'node:test';import assert from 'node:assert/strict';import {s
 test('practice history survives reload, searches and exports; stable-only mode skips partial decisions',{timeout:60000},async()=>{
  const fixture='outputs/history-ui-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
+ import {mockActionResponses} from '/evaluation/helpers/in-app-actions.mjs';
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit as emitMockEvent} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  mockWindows('launcher');window.calls=[];window.saved=JSON.parse(localStorage.getItem('fixture.history')||'{"sessions":[],"entries":{}}');
  const persist=()=>localStorage.setItem('fixture.history',JSON.stringify(window.saved));window.fakeTranscript=(name,segment)=>emitMockEvent(name,{segment});
+ mockActionResponses((kind,options,message)=>{window.calls.push({command:'in-app:'+kind,args:{options,message}});return kind==='confirm'?true:kind==='open'?null:'C:/fixture/history.md';});
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='load_interview_profile')return {settings:{sttEngine:'whisper_cpp',sttModel:'small',answer:{api:'deepseek',baseUrl:'https://api.deepseek.com',model:'deepseek-flash'},sharedModelConnection:true,decisionFinalOnly:true},resumeAnalysis:null};
  if(command==='plugin:app|version')return '1.0.14';if(command==='list_audio_devices')return JSON.stringify({inputs:[],outputs:[]});
@@ -16,7 +18,7 @@ test('practice history survives reload, searches and exports; stable-only mode s
  if(command==='history_end'){window.saved.sessions.find(item=>item.id===args.id).endedAt=args.at;persist();return;}
  if(command==='history_list')return window.saved.sessions.filter(item=>!args.query||JSON.stringify(window.saved.entries[item.id]).includes(args.query));
  if(command==='history_read')return {session:window.saved.sessions.find(item=>item.id===args.id),entries:window.saved.entries[args.id]};
- if(command==='plugin:dialog|save')return 'C:/fixture/history.md';if(command==='plugin:dialog|ask')return true;
+
  if(command==='history_delete'){window.saved.sessions=window.saved.sessions.filter(item=>item.id!==args.id);delete window.saved.entries[args.id];persist();return;}
  if(command==='practice_model')return args.input.action==='ask'?{question:'PPO 是什么？',intent:'technical',topic:'强化学习'}:{score:2,evidence:'我回答了 PPO',questionKind:'technical',corrections:[],missingPoints:[{point:'机制',explanation:'需要说明概率比与裁剪约束'}]};
  if(command==='mvp_answer'){await emitMockEvent('mvp_answer_token',{requestId:args.requestId,token:'PPO：Proximal Policy Optimization，近端策略优化。'});await emitMockEvent('mvp_answer_done',{requestId:args.requestId});return;}

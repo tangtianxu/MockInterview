@@ -17,17 +17,19 @@ fn schema(db:&Connection)->Result<(),String>{db.execute_batch("PRAGMA foreign_ke
 fn connect(app:&AppHandle)->Result<Connection,String>{let root=app.path().app_config_dir().map_err(|e|e.to_string())?;fs::create_dir_all(&root).map_err(|e|e.to_string())?;
  let db=Connection::open(root.join("history.sqlite3")).map_err(|e|e.to_string())?;db.busy_timeout(Duration::from_secs(5)).map_err(|e|e.to_string())?;schema(&db)?;Ok(db)}
 fn session_id(id:&str)->Result<(),String>{uuid::Uuid::parse_str(id).map(|_|()).map_err(|_|"历史会话 ID 无效".into())}
-fn write_entry(db:&Connection,id:&str,entry:&Entry)->Result<(),String>{
+fn write_entry(db:&Connection,id:&str,entry:&Entry)->Result<bool,String>{
  session_id(id)?;
  if entry.id.is_empty()||entry.id.len()>120||!entry.id.chars().all(|c|c.is_ascii_alphanumeric()||c=='-'||c=='_')||!matches!(entry.kind.as_str(),"transcript"|"question"|"answer"|"feedback"|"detail"|"usage"|"decision"|"retrieval")||entry.at.len()>40||entry.text.len()>64*1024{return Err("历史条目格式无效或内容过长".into());}
  let data=serde_json::to_string(&entry.data).map_err(|e|e.to_string())?;if data.len()>if matches!(entry.kind.as_str(),"decision"|"retrieval"){128*1024}else{64*1024}{return Err("历史条目附加内容过长".into());}
- db.execute("INSERT INTO history_entries(session_id,id,kind,at,text,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,id) DO UPDATE SET text=excluded.text,data=excluded.data",params![id,entry.id,entry.kind,entry.at,entry.text,data]).map_err(|e|e.to_string())?;Ok(())
+ // A late native completion must not resurrect a session the user deleted.
+ // The existence guard and insert are one SQLite statement, avoiding a TOCTOU.
+ let changed=db.execute("INSERT INTO history_entries(session_id,id,kind,at,text,data) SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS(SELECT 1 FROM history_sessions WHERE id=?1) ON CONFLICT(session_id,id) DO UPDATE SET text=excluded.text,data=excluded.data",params![id,entry.id,entry.kind,entry.at,entry.text,data]).map_err(|e|e.to_string())?;Ok(changed>0)
 }
 #[command]
 pub fn history_begin(app:AppHandle,session:Session)->Result<(),String>{session_id(&session.id)?;if !matches!(session.mode.as_str(),"practice"|"live"|"manual")||session.title.len()>500||session.started_at.len()>40{return Err("历史会话格式无效".into());}
  connect(&app)?.execute("INSERT INTO history_sessions(id,mode,started_at,title) VALUES(?1,?2,?3,?4)",params![session.id,session.mode,session.started_at,session.title]).map_err(|e|e.to_string())?;Ok(())}
 #[command]
-pub fn history_record(app:AppHandle,session_id:String,entry:Entry)->Result<(),String>{write_entry(&connect(&app)?,&session_id,&entry)}
+pub fn history_record(app:AppHandle,session_id:String,entry:Entry)->Result<(),String>{if write_entry(&connect(&app)?,&session_id,&entry)?{Ok(())}else{Err("历史会话尚未创建或已删除，本条记录未保存。".into())}}
 #[command]
 pub fn history_end(app:AppHandle,id:String,at:String)->Result<(),String>{session_id(&id)?;connect(&app)?.execute("UPDATE history_sessions SET ended_at=?2 WHERE id=?1",params![id,at]).map_err(|e|e.to_string())?;Ok(())}
 #[command]
@@ -55,6 +57,7 @@ pub fn record_usage(app:&AppHandle,id:Option<&str>,stage:&str,model:&str,provide
  if let Err(error)=connect(app).and_then(|db|write_entry(&db,id,&entry)){log::warn!("History usage save failed: {error}");let _=tauri::Emitter::emit(app,"history_save_error",error);}
 }
 #[cfg(test)]mod tests{use super::*;
+ #[test]fn late_native_entry_does_not_recreate_a_deleted_session(){let db=Connection::open_in_memory().unwrap();schema(&db).unwrap();let id=uuid::Uuid::new_v4().to_string();let entry=Entry{id:"late-1".into(),kind:"usage".into(),at:"now".into(),text:"late usage".into(),data:Value::Null};assert!(!write_entry(&db,&id,&entry).unwrap());assert_eq!(db.query_row("SELECT count(*) FROM history_sessions",[],|r|r.get::<_,i64>(0)).unwrap(),0);assert_eq!(db.query_row("SELECT count(*) FROM history_entries",[],|r|r.get::<_,i64>(0)).unwrap(),0);assert_eq!(db.query_row("PRAGMA foreign_keys",[],|r|r.get::<_,i64>(0)).unwrap(),1);}
  #[test]fn history_upserts_keeps_order_and_cascade_deletes(){let db=Connection::open_in_memory().unwrap();schema(&db).unwrap();let id=uuid::Uuid::new_v4().to_string();db.execute("INSERT INTO history_sessions(id,mode,started_at,title) VALUES(?1,'live','2026-10-10','测试')",[&id]).unwrap();let mut entry=Entry{id:"a-1".into(),kind:"answer".into(),at:"now".into(),text:"增量".into(),data:Value::Null};write_entry(&db,&id,&entry).unwrap();entry.text="完整内容".into();write_entry(&db,&id,&entry).unwrap();let saved=read(&db,&id).unwrap();assert_eq!(saved["entries"].as_array().unwrap().len(),1);assert_eq!(saved["entries"][0]["text"],"完整内容");db.execute("DELETE FROM history_sessions WHERE id=?1",[id]).unwrap();assert_eq!(db.query_row("SELECT count(*) FROM history_entries",[],|r|r.get::<_,i64>(0)).unwrap(),0);}
 }
 

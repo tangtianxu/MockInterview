@@ -1,4 +1,5 @@
 pub mod audio_commands;
+pub mod action_commands;
 pub mod context_commands;
 pub mod credential_commands;
 pub mod gemini_cache_commands;

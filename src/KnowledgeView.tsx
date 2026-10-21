@@ -1,7 +1,8 @@
 import {useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {listen,type UnlistenFn} from '@tauri-apps/api/event';
-import {open,save,ask} from '@tauri-apps/plugin-dialog';
+import {open,save,ask} from './inAppActions';
+import {UserCancelled,isUserCancelled} from './inAppActions';
 import {BookOpen,Plus,RefreshCw,X} from 'lucide-react';
 import {MathText} from './MathText';
 import {PreparationRoadmap} from './PreparationRoadmap';
@@ -49,14 +50,14 @@ export function KnowledgeView({model,historyId='',onClose,onChange,onBusyChange}
  const categories=[...new Set([...bankCategories,...(snapshot?.questions.map(q=>q.category)||[])])];
  const endpoint=(choice=preset):KnowledgeEndpoint=>({...model,model:choice==='current'?model.model:choice==='flash'?'deepseek-flash':'deepseek-v4-pro',usageStage:'知识库整理'});
  const configure=async(values:Partial<{enabled:boolean;activeProject:string;buildModel:string}>)=>{if(!snapshot)return;try{applySnapshot(await invoke<KnowledgeSnapshot>('knowledge_configure',{enabled:snapshot.library.enabled,activeProject:snapshot.library.activeProject,buildModel:preset,...values}));}catch(cause){setError(String(cause));}};
- const work=async(label:string,action:()=>Promise<void>)=>{if(busy)return;setBusy(label);setError('');setNote('');stopRef.current=false;try{await action();}catch(cause){if(alive.current)setError(String(cause));}finally{if(alive.current)setBusy('');}};
+ const work=async(label:string,action:()=>Promise<void>)=>{if(busy)return;setBusy(label);setError('');setNote('');stopRef.current=false;try{await action();}catch(cause){if(alive.current){if(isUserCancelled(cause))setNote(cause.message);else setError(String(cause));}}finally{if(alive.current)setBusy('');}};
  const approve=async(plan:KnowledgePlan)=>{if(model.api==='ollama')return true;setSendPlan(plan);return new Promise<boolean>(resolve=>{confirmRef.current=resolve;});};
  const settle=(value:boolean)=>{confirmRef.current?.(value);confirmRef.current=null;setSendPlan(null);};
  const run=async(action:string,input:Record<string,unknown>,choice=preset)=>{
   if(choice!=='current'&&model.api!=='deepseek')throw Error('Flash/Pro 对照需要先在模型与服务中配置 DeepSeek 官方 API。');
   if(model.api==='ollama')await invoke('start_local_service',{service:'ollama'});
   const plan=await invoke<KnowledgePlan>('knowledge_prepare',{endpoint:endpoint(choice),input:{action,project,...input}});
-  const agreed=await approve(plan);if(!agreed||stopRef.current){await invoke('knowledge_discard_plan',{token:plan.token});throw Error('已取消本次发送；现有内容未改变。');}
+  const agreed=await approve(plan);if(!agreed||stopRef.current){await invoke('knowledge_discard_plan',{token:plan.token});throw new UserCancelled('已取消本次发送；现有内容未改变。');}
   const result=await invoke<KnowledgeResult>('knowledge_run',{token:plan.token,consent:agreed});return {plan,result};
  };
  const chooseEditor=async(q:BankQuestion)=>{if(dirty.current&&!await ask('当前题目有未保存修改，是否放弃并打开另一题？',{title:'未保存修改',kind:'warning'}))return;dirty.current=false;setEditor({...q});setEditorChecked(false);};

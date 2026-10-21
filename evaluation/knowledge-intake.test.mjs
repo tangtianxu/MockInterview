@@ -7,15 +7,17 @@ import {chromium} from 'playwright-core';
 test('unstructured materials, reviewed classification and optional Agent/document imports preserve old answers',{timeout:90000},async()=>{
  const fixture='outputs/knowledge-intake-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body class="theme-light"><div id="root"></div><script type="module">
+ import {mockActionResponses} from '/evaluation/helpers/in-app-actions.mjs';
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {KnowledgeView} from '/src/KnowledgeView.tsx';import {emptyQuestion} from '/src/knowledge.ts';import '/src/index.css';
  const old={...emptyQuestion('Old'),id:'old',question:'旧题',answer:'本人已确认的原答案',status:'confirmed'};
  mockWindows('launcher');window.calls=[];window.kind='agent';window.nextPath='C:/SYNTHETIC/materials';window.pending={};
  window.saved={root:'C:/SYNTHETIC/library',library:{enabled:false,activeProject:'',buildModel:'current',folders:[],sources:[],projectProposals:[]},questions:[old],errors:[],inbox:{items:[],matches:[],drafts:[],editor:null,cursor:null}};
  const sources=['report.docx','train.py'].map((name,i)=>({id:'s'+i,path:'C:/SYNTHETIC/'+name,relativePath:name,project:'待确认资料',hash:'hash'+i,modified:1,characters:500,status:'ready',note:''}));
+ mockActionResponses((kind,options,message)=>{window.calls.push({command:'in-app:'+kind,args:{options,message}});return kind==='confirm'?true:kind==='open'?window.nextPath:'C:/SYNTHETIC/prompt.txt';});
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='knowledge_snapshot')return structuredClone(window.saved);
- if(command==='plugin:dialog|open')return window.nextPath;
- if(command==='plugin:dialog|save')return 'C:/SYNTHETIC/prompt.txt';
+
+
  if(command==='knowledge_import_folder'){window.saved.library.sources=structuredClone(sources);window.saved.library.organizationMode=args.mode==='project'?'auto':args.mode;if(args.mode==='project')window.saved.library.sources.forEach(s=>s.project=args.projectName||'materials');if(args.mode==='organized')window.saved.library.sources.forEach((s,i)=>s.project='AgentProject'+i);return structuredClone(window.saved);}
  if(command==='knowledge_save_inbox'){window.saved.inbox=structuredClone(args.inbox);return;}
  if(command==='knowledge_prepare_organization'){const token='classification';window.pending[token]='organize';const p={token,action:'organize',model:'synthetic',destination:'https://example.test',characters:300,files:sources.map(s=>s.relativePath),preview:'SYNTHETIC FILE OVERVIEWS',batch:0,totalBatches:1};return {plans:[p],characters:300,files:p.files,preview:p.preview,model:p.model,destination:p.destination};}

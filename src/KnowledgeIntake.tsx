@@ -1,6 +1,6 @@
 import {useEffect,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {open,save} from '@tauri-apps/plugin-dialog';
+import {open,save} from './inAppActions';
 import type {KnowledgeSnapshot,ProjectProposal} from './knowledge';
 import {PreparationRoadmap} from './PreparationRoadmap';
 import {AgentMaterialInstructions} from './AgentMaterialInstructions';

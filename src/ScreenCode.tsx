@@ -50,7 +50,7 @@ export function useScreenCode(options:SolverOptions){
    }));
    if(endpoint.api==="ollama")await invoke("start_local_service",{service:"ollama"});
    if(!current()){cancelled=true;return;}
-   await invoke("mvp_answer",{endpoint:history.endpoint(endpoint,"截屏代码题解答"),requestId:id,question:problem,
+   await invoke("mvp_answer",{endpoint:await history.endpoint(endpoint,"截屏代码题解答",current),requestId:id,question:problem,
     codeQuestion:true,focus:[],keyTerms:[],constraints:[language],uncertainTerms:[]});
    if(current()&&!text.current.trim()&&!failure)throw new Error("模型没有返回解答，请检查模型连接后重试。");
   }catch(cause){failure=String(cause);if(current())setError(failure);}

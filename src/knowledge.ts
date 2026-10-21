@@ -1,5 +1,5 @@
 import {invoke} from '@tauri-apps/api/core';
-import {ask} from '@tauri-apps/plugin-dialog';
+import {ask} from './inAppActions.ts';
 export type KnowledgeEndpoint={api:string;baseUrl:string;model:string;credentialSlot?:string;historySessionId?:string|null;usageStage?:string};
 export type KnowledgeSource={id:string;path:string;relativePath:string;project:string;hash:string;modified:number;characters:number;status:string;note:string};
 export type KnowledgeReference={sourceId:string;hash:string;quote:string};
@@ -34,7 +34,7 @@ export function effectiveExports(items:BankQuestion[],matches:KnowledgeMatch[],b
 }
 // A saved verbatim answer never leaves this machine. Semantic matching and
 // synthesis require fresh consent for the actual payload, not a stored toggle.
-export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean,conversation=''):Promise<{exact?:BankQuestion;context?:KnowledgeContext;missingProject?:boolean;missingEvidence?:boolean}>{
+export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoint,stillCurrent:()=>boolean,conversation=''):Promise<{exact?:BankQuestion;context?:KnowledgeContext;missingProject?:boolean;missingEvidence?:boolean;cancelled?:boolean}>{
  const lookup=await invoke<KnowledgeLookup>('knowledge_lookup',{query,context:conversation,historySessionId:endpoint.historySessionId});
  if(!stillCurrent()||!lookup.enabled)return {};
  if(lookup.exact)return {exact:lookup.exact};
@@ -42,8 +42,8 @@ export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoi
  {
   const plan=await invoke<KnowledgePlan>('knowledge_prepare',{endpoint,input:{action:'match',question:{...emptyQuestion(),question:query},dialogueContext:conversation}});
   if(!stillCurrent()){await invoke('knowledge_discard_plan',{token:plan.token});return {};}
-  const agreed=endpoint.api==='ollama'||await ask(`本次语义检索将发送当前问题、最近对话，以及 ${lookup.questions.length} 条候选标题、别名和项目名称，不发送标准答案或原资料。\n目标：${plan.destination}\n模型：${plan.model}\n约 ${plan.characters} 字。仅本次授权，是否发送？`,{title:'确认本次题库匹配发送',kind:'warning'});
-  if(!agreed){await invoke('knowledge_discard_plan',{token:plan.token});throw Error('已取消本次项目问题匹配');}
+  const agreed=endpoint.api==='ollama'||await ask(`本次语义检索将发送当前问题、最近对话，以及 ${lookup.questions.length} 条候选标题、别名和项目名称，不发送标准答案或原资料。\n目标：${plan.destination}\n模型：${plan.model}\n约 ${plan.characters} 字。仅本次授权，是否发送？`,{title:'确认本次题库匹配发送',kind:'warning',isCurrent:stillCurrent,okLabel:'发送本次内容',cancelLabel:'跳过本次'});
+  if(!agreed){await invoke('knowledge_discard_plan',{token:plan.token});return {cancelled:true};}
   if(!stillCurrent()){await invoke('knowledge_discard_plan',{token:plan.token});return {};}
   const result=await invoke<KnowledgeResult>('knowledge_run',{token:plan.token,consent:true});if(!stillCurrent())return {};
   const relation=result.matches[0]?.relation;
@@ -68,6 +68,6 @@ export async function knowledgeForQuestion(query:string,endpoint:KnowledgeEndpoi
  const context={questions:selected,passages:passages.slice(0,5),consent:false};
  const preview=[...context.questions.map(q=>`已确认题目：${q.question}\n回答：${q.answer}\n展开：${q.explanation}`),...context.passages.map(p=>`${p.path} · ${p.locator}\n${p.text}`)].join('\n\n');
  const sources=[...context.questions.map(q=>`题库：${q.question}`),...context.passages.map(p=>`${p.path} · ${p.locator}`)].join('\n');
- const agreed=endpoint.api==='ollama'||await ask(`本次回答会发送当前问题、${context.questions.length} 条已确认问答及 ${context.passages.length} 段相关资料。\n目标：${endpoint.baseUrl}\n模型：${endpoint.model}\n资料范围：\n${sources}\n项目背景约 ${preview.length} 字。仅本次授权，是否发送？`,{title:'确认本次项目背景发送',kind:'warning'});
- if(!agreed)throw Error('已取消本次项目背景发送');if(!stillCurrent())return {};context.consent=true;return {context};
+ const agreed=endpoint.api==='ollama'||await ask(`本次回答会发送当前问题、${context.questions.length} 条已确认问答及 ${context.passages.length} 段相关资料。\n目标：${endpoint.baseUrl}\n模型：${endpoint.model}\n资料范围：\n${sources}\n项目背景约 ${preview.length} 字。仅本次授权，是否发送？`,{title:'确认本次项目背景发送',kind:'warning',isCurrent:stillCurrent,okLabel:'发送本次内容',cancelLabel:'跳过本次'});
+ if(!agreed)return {cancelled:true};if(!stillCurrent())return {};context.consent=true;return {context};
 }

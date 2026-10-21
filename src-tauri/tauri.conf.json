@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "MockInterview",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "identifier": "app.interviewcue.local",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -81,7 +81,7 @@
         "https://github.com/tangtianxu/MockInterview/releases/latest/download/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     }
   }

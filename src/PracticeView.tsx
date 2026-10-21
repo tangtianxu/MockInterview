@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ask as confirmSend, open as choosePath } from "@tauri-apps/plugin-dialog";
+import { ask as confirmSend, open as choosePath } from "./inAppActions";
+import {UserCancelled,isUserCancelled} from './inAppActions';
 import { AudioLines, Clock3, FileText, Play, Send, Sparkles, Square } from "lucide-react";
 import "./practice.css";
 import { MathText } from "./MathText";
@@ -105,7 +106,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     const content=label==="简历分析" ? "简历文字（最多 12,000 字）" : `领域、岗位、主题及当前问题${label==="评价" ? "与你的作答" : ""}${includesResume ? "、简历摘录（最多 8,000 字）和已保存的分析" : "（可能包含项目相关信息）"}`;
     const agreed=await confirmSend(`本次${label}会将${content}发送至 ${destination}。仅本次授权，是否继续？`,
       {title:"确认本次背景发送",kind:"warning"});
-    if(!agreed)throw new Error("已取消本次请求");
+    if(!agreed)throw new UserCancelled("已取消本次请求");
     return agreed;
   };
   const request = async (action: "analyze" | "ask" | "evaluate", fields: Record<string,unknown> = {}, background=currentBackground()) => {
@@ -114,7 +115,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
     const consentToSendResume=fields.knowledgeContext ? false : action==="analyze" ? await authorizeBackground({...background,resumeText:String(fields.resumeText || ""),resumeAnalysis:""},"简历分析") : await authorizeBackground(background,action==="ask" ? "出题" : "评价",fields.questionKind==="project" || fields.questionKind==="mixed");
     if(epoch!==sessionEpochRef.current)throw new Error("本轮操作已结束");
-    return invoke<Record<string,unknown>>("practice_model",{endpoint:history.endpoint(model,action==="ask"?"练习出题":action==="evaluate"?"练习评价":"简历分析"),input:{
+    return invoke<Record<string,unknown>>("practice_model",{endpoint:await history.endpoint(model,action==="ask"?"练习出题":action==="evaluate"?"练习评价":"简历分析",()=>epoch===sessionEpochRef.current),input:{
       ...background,preferences:local ? background.preferences : "",action,minutes:config.minutes,
       consentToSendResume,history:"",askedQuestions:[],question:"",questionKind:"",answer:"",...fields,
     }});
@@ -133,7 +134,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     if (!resume) return;
     setBusy("analyze");setError("");
     try {const value = await request("analyze",{resumeText:resume.text,resumeAnalysis:""});onAnalysis(value as Analysis);}
-    catch (cause) {setError(`简历分析失败：${String(cause)}`);}
+    catch (cause) {setError(isUserCancelled(cause)?"":`简历分析失败：${String(cause)}`);}
     finally {setBusy(null);}
   };
   const cancelReference=()=>{
@@ -161,7 +162,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       }
       const background=currentQuestion.background || currentBackground();
       let knowledgeContext:KnowledgeContext|undefined;
-      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,model,stillCurrent);if(!stillCurrent())return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
+      if(knowledgeEnabled){const bank=await knowledgeForQuestion(currentQuestion.question,await history.endpoint(model,"参考检索",stillCurrent),stillCurrent);if(!stillCurrent()||bank.cancelled)return;if(bank.missingProject)throw Error("请在“面试准备”的生成与使用设置中指定优先使用的项目。");if(bank.missingEvidence)throw Error("未检索到可靠项目依据，请先导入资料或确认标准回答。");if(bank.exact){current.text=[bank.exact.answer,bank.exact.explanation].filter(Boolean).join("\n\n");setReference({text:current.text,loading:false,error:""});setTurns(value=>{const next=value.map(turn=>turn.id===turnId?{...turn,reference:current.text}:turn);turnsRef.current=next;return next;});history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:"knowledge"},current.id);return;}knowledgeContext=bank.context;}
       const consentToSendResume=knowledgeContext ? false : await authorizeBackground(background,"参考生成",currentQuestion.intent!=="technical");
       if(!stillCurrent())return;
       if(local)await invoke("start_local_service",{service:"ollama"});
@@ -178,13 +179,13 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       });
       if(!stillCurrent()){stop();return;}
       referenceStopsRef.current.push(stop);
-      await invoke("mvp_answer",{endpoint:history.endpoint(model,"参考生成"),requestId:current.id,question:currentQuestion.question,
+      await invoke("mvp_answer",{endpoint:await history.endpoint(model,"参考生成",stillCurrent),requestId:current.id,question:currentQuestion.question,
         focus:[],keyTerms:[],constraints:[],uncertainTerms:[],practiceReference:true,
         knowledgeContext,practiceContext:{...background,resumeText:knowledgeContext?"":background.resumeText,resumeAnalysis:knowledgeContext?"":background.resumeAnalysis,preferences:local ? background.preferences : "",consentToSendResume}});
       if(stillCurrent() && !current.text.trim())throw new Error("回答模型未返回参考答案，请重试。");
       if(stillCurrent())history.record("answer",current.text,{question:currentQuestion.question,complete:true,source:local?"local":"api"},current.id);
     }catch(cause){if(stillCurrent()){
-      setReference(value=>({...value,error:`参考生成失败：${String(cause)}`}));
+      setReference(value=>({...value,error:isUserCancelled(cause)?"":`参考生成失败：${String(cause)}`}));
       setTurns(value=>{
         const next=value.map(turn=>turn.id===turnId ? {...turn,reference:undefined} : turn);
         turnsRef.current=next;return next;
@@ -228,7 +229,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       setQuestion({...value,background});setFeedback(null);setDraft("");
       history.record("question",value.question,{topic:value.topic||""});
       return true;
-    } catch (cause) {if(operationRef.current.current(token))setError(`生成问题失败：${String(cause)}`);return false;}
+    } catch (cause) {if(operationRef.current.current(token))setError(isUserCancelled(cause)?"":`生成问题失败：${String(cause)}`);return false;}
     finally {if(operationRef.current.finish(token))setBusy(null);}
   };
   const start = async () => {
@@ -257,7 +258,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
     setBusy("feedback");setError("");
     try {
       let knowledgeContext:KnowledgeContext|undefined;
-      if(currentQuestion.bankQuestion){const agreed=local||await confirmSend(`本次评价将发送当前问题、你的作答与该题的已确认标准回答，发送至 ${model.baseUrl}，模型 ${model.model}；不发送简历全文或其他资料。仅本次授权，是否继续？`,{title:"确认本次题库评价发送",kind:"warning"});if(!agreed)throw Error("已取消评价");knowledgeContext={questions:[currentQuestion.bankQuestion],passages:[],consent:true};}
+      if(currentQuestion.bankQuestion){const agreed=local||await confirmSend(`本次评价将发送当前问题、你的作答与该题的已确认标准回答，发送至 ${model.baseUrl}，模型 ${model.model}；不发送简历全文或其他资料。仅本次授权，是否继续？`,{title:"确认本次题库评价发送",kind:"warning"});if(!agreed)throw new UserCancelled("已取消评价");knowledgeContext={questions:[currentQuestion.bankQuestion],passages:[],consent:true};}
       const value = await request("evaluate",{question:currentQuestion.question,questionKind:currentQuestion.intent || "mixed",answer:currentAnswer,knowledgeContext},currentQuestion.background);
       if(!operationRef.current.current(token))return;
       const result = value as Feedback;
@@ -268,7 +269,7 @@ export function PracticeView({model, domain, liveRunning, stt, personalization, 
       // Knowledge questions automatically receive an independent reference answer.
       // Project-related questions require an explicit action/consent for the extra call.
       if(result.questionKind==="technical"||currentQuestion.bankQuestion)void generateReference(currentQuestion,turnId,epoch);
-    } catch (cause) {if(operationRef.current.current(token))setError(`生成反馈失败：${String(cause)}`);}
+    } catch (cause) {if(operationRef.current.current(token))setError(isUserCancelled(cause)?"":`生成反馈失败：${String(cause)}`);}
     finally {if(operationRef.current.finish(token))setBusy(null);}
   };
 

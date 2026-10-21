@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {save} from '@tauri-apps/plugin-dialog';
+import {save} from './inAppActions';
 
 type Props={busy:boolean;work:(label:string,action:()=>Promise<void>)=>Promise<void>;notice:(text:string)=>void};
 export function AgentMaterialInstructions({busy,work,notice}:Props){

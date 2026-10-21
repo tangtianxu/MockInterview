@@ -7,10 +7,12 @@ import {chromium} from 'playwright-core';
 test('manual questions require send approval and adoption; drafts survive reload; history exports merge aliases',{timeout:70000},async()=>{
  const fixture='outputs/knowledge-ui-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body class="theme-light"><div id="root"></div><script type="module">
+ import {mockActionResponses} from '/evaluation/helpers/in-app-actions.mjs';
  import React,{useState} from 'react';import {createRoot} from 'react-dom/client';import {mockIPC} from '@tauri-apps/api/mocks';import {KnowledgeView} from '/src/KnowledgeView.tsx';import {emptyQuestion,knowledgeForQuestion} from '/src/knowledge.ts';import '/src/index.css';
  const initial={...emptyQuestion('A'),id:'11111111-1111-4111-8111-111111111111',category:'技术基础',question:'PPO 是什么？',answer:'本人核实的原回答',status:'confirmed',origins:[{sessionId:'old',entryId:'one',at:'',original:'PPO 是什么？'}]};
  window.saved=JSON.parse(localStorage.getItem('knowledge.fixture')||'null')||{root:'C:/fixture/library',library:{enabled:true,activeProject:'',buildModel:'current',folders:[],sources:[]},questions:[initial],errors:[],inbox:{items:[],matches:[],drafts:[],editor:null,cursor:null}};
  const persist=()=>localStorage.setItem('knowledge.fixture',JSON.stringify(window.saved));window.calls=[];window.plans={};window.lookup=(query)=>knowledgeForQuestion(query,{api:'deepseek',baseUrl:'https://api.deepseek.com',model:'deepseek-flash'},()=>true);
+ mockActionResponses((kind,options,message)=>{window.calls.push({command:'in-app:'+kind,args:{options,message}});return kind==='confirm'?true:kind==='open'?null:'C:/fixture/questions.json';});
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='knowledge_snapshot')return structuredClone(window.saved);
  if(command==='knowledge_save_inbox'){window.saved.inbox=args.inbox;persist();return;}
@@ -22,7 +24,7 @@ test('manual questions require send approval and adoption; drafts survive reload
   if(input.action==='dedup')return {items:input.items.map((q,i)=>({...q,project:'A',category:'技术基础',task:i?'使用条件':'定义'})),matches:input.items.map((q,i)=>({questionId:q.id,duplicateId:i?'':initial.id,relation:i?'new':'same',reason:i?'任务不同':'同一任务的不同问法'})),warnings:[],model:'deepseek-flash',elapsedMs:100,usage:{}};
  }
  if(command==='knowledge_history_questions')return [{...emptyQuestion('A'),category:'技术基础',question:'解释一下 PPO',origins:[{sessionId:'past',entryId:'one',at:'',original:'解释一下 PPO'}]},{...emptyQuestion('A'),category:'技术基础',question:'什么情况下使用 PPO',origins:[{sessionId:'past',entryId:'two',at:'',original:'什么情况下使用 PPO'}]}];
- if(command==='plugin:dialog|save')return 'C:/fixture/questions.json';if(command==='plugin:dialog|ask')return true;
+
  return null;},{shouldMockEvents:true});
  function Root(){const [opened,setOpened]=useState(true);const [history,setHistory]=useState('');return opened?React.createElement(KnowledgeView,{model:{api:'deepseek',baseUrl:'https://api.deepseek.com',model:'deepseek-flash'},historyId:history,onClose:()=>setOpened(false),onChange:()=>{},onBusyChange:()=>{}}):React.createElement('div',null,React.createElement('button',{onClick:()=>{setHistory('');setOpened(true)}},'打开题库'),React.createElement('button',{onClick:()=>{setHistory('past');setOpened(true)}},'导入历史问题'));}createRoot(document.getElementById('root')).render(React.createElement(Root));
  </script></body></html>`);
@@ -31,7 +33,7 @@ test('manual questions require send approval and adoption; drafts survive reload
  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:1180,height:880}});const errors=[];page.on('pageerror',e=>errors.push(e.message));page.setDefaultTimeout(10000);page.setDefaultNavigationTimeout(30000);await page.goto(url);
  await page.getByRole('button',{name:'自己写问题',exact:true}).click();await page.getByRole('textbox',{name:'问题',exact:true}).fill('我如何实现项目缓存？');
  await page.getByRole('button',{name:'让模型准备答案',exact:true}).click();await page.getByRole('alertdialog').waitFor();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='knowledge_run').length),0);
- await page.getByRole('button',{name:'取消发送',exact:true}).click();await page.getByRole('alert').waitFor();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='knowledge_run').length),0);
+ await page.getByRole('button',{name:'取消发送',exact:true}).click();await page.getByRole('status').filter({hasText:'已取消本次发送'}).waitFor();assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='knowledge_run').length),0);
  await page.getByRole('button',{name:'让模型准备答案',exact:true}).click();await page.getByRole('button',{name:'同意本次发送',exact:true}).click();await page.getByText('API 的新回答草稿',{exact:true}).waitFor();
  assert.equal(await page.getByRole('textbox',{name:'回答',exact:true}).inputValue(),'');assert.equal(await page.evaluate(()=>window.saved.questions.length),1);
  await page.getByRole('button',{name:'放入编辑区',exact:true}).click();await page.getByRole('textbox',{name:'回答',exact:true}).fill('我核对后采用的真实回答');

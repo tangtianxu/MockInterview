@@ -2,8 +2,10 @@ import {test} from 'node:test';import assert from 'node:assert/strict';import {s
 test('API onboarding needs no Ollama; downloads report every phase and resume upload requires fresh consent',{timeout:60000},async()=>{
  const fixture='outputs/onboarding-fixture.html';await mkdir('outputs',{recursive:true});
  await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
+ import {mockActionResponses} from '/evaluation/helpers/in-app-actions.mjs';
  import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockWindows} from '@tauri-apps/api/mocks';import {emit} from '@tauri-apps/api/event';import App from '/src/App.tsx';import '/src/index.css';
  mockWindows('launcher');window.calls=[];window.downloaded=false;window.allowSending=false;window.connected=false;window.progress=payload=>emit('model_download_progress',payload);
+ mockActionResponses((kind,options,message)=>{window.calls.push({command:'in-app:'+kind,args:{options,message}});return kind==='confirm'?window.allowSending:kind==='open'?options.directory?'C:/models':'C:/fixture/resume.txt':null;});
  mockIPC(async(command,args)=>{window.calls.push({command,args});
  if(command==='load_interview_profile')return {settings:new URLSearchParams(location.search).has('legacy')?{api:'ollama',sttModel:'small'}:{},resumeAnalysis:null};if(command==='plugin:app|version')return '1.0.15';
  if(command==='check_audio_devices')return true;
@@ -17,7 +19,7 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  if(command==='delete_ollama_model'){window.ollamaDeleted=true;return;}
  if(command==='has_api_key')return true;if(command.includes('is_registered'))return false;
  if(command==='get_privacy_display_state'||command==='set_taskbar_hidden')return {errors:[],launcher_capture_excluded:true,overlay_capture_excluded:true,taskbar_hidden:true};
- if(command==='plugin:dialog|open')return args.options.directory?'C:/models':'C:/fixture/resume.txt';if(command==='plugin:dialog|ask')return window.allowSending;
+
  if(command==='practice_read_resume')return {name:'fixture.txt',text:'SYNTHETIC_RESUME_ONLY',hash:'fixture-hash',truncated:false};
  if(command==='practice_model')return {summary:'SYNTHETIC_ANALYSIS',skills:[],projects:[],uncertainties:[],suggestedTopics:[]};
  return null;},{shouldMockEvents:true});createRoot(document.getElementById('root')).render(React.createElement(App));
@@ -50,12 +52,12 @@ test('API onboarding needs no Ollama; downloads report every phase and resume up
  assert.equal(await guide.locator('[aria-label="已完成"]').count(),3);assert.equal(await guide.locator('.guide-switch-step').count(),0);await guide.getByRole('button',{name:'先跳过个性化资料',exact:true}).click();await guide.locator('.guide-switch-step').waitFor();assert.equal(await guide.locator('[aria-label="已完成"]').count(),4);await guide.getByRole('button',{name:'选择语音模型路径',exact:true}).click();
  await page.waitForFunction(()=>window.calls.some(c=>c.command==='save_local_stt_model_directory'));
  await guide.getByRole('button',{name:'上传个人简历',exact:true}).click();await guide.getByRole('button',{name:'分析简历',exact:true}).waitFor();
- await guide.getByRole('button',{name:'分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='plugin:dialog|ask'));
+ await guide.getByRole('button',{name:'分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='in-app:confirm'));
  assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='practice_model').length),0,'refusal must block every resume model request');
  await page.evaluate(()=>window.allowSending=true);await guide.getByRole('button',{name:'分析简历',exact:true}).click();await guide.getByText(/fixture.txt · 已保存分析/).waitFor();
  const sent=await page.evaluate(()=>window.calls.find(c=>c.command==='practice_model'));assert.equal(sent.args.endpoint.api,'deepseek');assert.equal(sent.args.input.consentToSendResume,true);assert.equal(sent.args.input.resumeText,'SYNTHETIC_RESUME_ONLY');
  assert.equal(await page.evaluate(()=>window.calls.filter(c=>c.command==='start_local_service').length),0,'API branch must never start Ollama');
- await guide.getByRole('button',{name:'重新分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.filter(c=>c.command==='plugin:dialog|ask').length===3);
+ await guide.getByRole('button',{name:'重新分析简历',exact:true}).click();await page.waitForFunction(()=>window.calls.filter(c=>c.command==='in-app:confirm').length===3);
  assert.equal(await guide.locator('[aria-label="已完成"]').count(),4);assert.equal(await guide.getByRole('button',{name:'已完成效果测试',exact:true}).count(),0);
  assert.ok(await guide.evaluate(element=>element.scrollWidth<=element.clientWidth+1),'narrow guide must not overflow');await page.screenshot({path:'outputs/onboarding-api-narrow.png'});
  await guide.getByRole('button',{name:'使用本地 Ollama',exact:true}).click();await guide.getByRole('button',{name:'下载 Ollama',exact:true}).waitFor();await guide.getByRole('button',{name:'连接并启动 Ollama',exact:true}).click();await guide.getByRole('button',{name:'Ollama 已连接',exact:true}).waitFor();

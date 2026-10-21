@@ -1,6 +1,6 @@
 import {useEffect,useState} from "react";
 import {invoke} from "@tauri-apps/api/core";
-import {ask,save} from "@tauri-apps/plugin-dialog";
+import {ask,save} from "./inAppActions";
 import {MathText} from "./MathText";
 import {CodeAnswer} from "./ScreenCode";
 import type {HistorySession,HistoryRecord} from "./history";

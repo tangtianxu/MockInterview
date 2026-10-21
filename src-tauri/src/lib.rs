@@ -104,10 +104,8 @@ pub fn run() {
     ).init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
@@ -448,6 +446,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::action_commands::action_browse_files,
+            commands::action_commands::action_resolve_paths,
             mvp_commands::mvp_list_models,
             mvp_commands::mvp_test_model_endpoint,
             mvp_commands::mvp_copy_model_key,
