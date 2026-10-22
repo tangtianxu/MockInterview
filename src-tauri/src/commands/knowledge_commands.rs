@@ -970,6 +970,14 @@ pub struct AnswerContext {
 }
 impl AnswerContext {
     pub fn validate(&self, root: &Path, remote: bool) -> Result<(), String> {
+        let (_,removed_questions,removed_passages)=self.clone().sanitized(root,remote)?;
+        if removed_questions>0{return Err("标准回答已变更或尚未确认".into());}
+        if removed_passages>0{return Err("资料摘录已失效".into());}
+        Ok(())
+    }
+    // A stale index row or an edit during recall invalidates that item alone.
+    // Valid confirmed answers remain useful even if another passage is stale.
+    pub fn sanitized(mut self, root: &Path, remote: bool) -> Result<(Self,usize,usize), String> {
         if remote && !self.consent {
             return Err("本次项目背景发送未明确同意".into());
         }
@@ -980,21 +988,17 @@ impl AnswerContext {
             return Err("项目上下文过多".into());
         }
         let snap = kb::snapshot(root)?;
-        for q in &self.questions {
-            if !snap.questions.iter().any(|v| {
+        let question_count=self.questions.len();let passage_count=self.passages.len();
+        self.questions.retain(|q|snap.questions.iter().any(|v| {
                 v.id == q.id
                     && v.status == "confirmed"
                     && v.answer == q.answer
                     && v.question == q.question
                     && v.project == q.project
                     && v.explanation == q.explanation
-            }) {
-                return Err("标准回答已变更或尚未确认".into());
-            }
-        }
-        for p in &self.passages {
-            if p.text.trim().is_empty()
-                || !snap.library.sources.iter().any(|s| {
+            }));
+        self.passages.retain(|p|!p.text.trim().is_empty()
+                && snap.library.sources.iter().any(|s| {
                     s.id == p.source_id
                         && s.hash == p.hash
                         && s.status == "ready"
@@ -1002,14 +1006,10 @@ impl AnswerContext {
                         && s.relative_path == p.path
                         && kb::stamp(Path::new(&s.path)) == s.modified
                 })
-                || !kb::chunks(&kb::source_text(root, &p.source_id)?)
-                    .iter()
-                    .any(|(label, text)| label == &p.locator && text == &p.text)
-            {
-                return Err("资料摘录已失效".into());
-            }
-        }
-        Ok(())
+                && kb::source_text(root, &p.source_id).map(|text|kb::chunks(&text)
+                    .iter().any(|(label,text)|label==&p.locator&&text==&p.text)).unwrap_or(false));
+        let removed_questions=question_count-self.questions.len();let removed_passages=passage_count-self.passages.len();
+        Ok((self,removed_questions,removed_passages))
     }
     pub fn text(&self) -> String {
         let questions=self.questions.iter().map(|q|json!({"id":q.id,"project":q.project,"question":q.question,"answer":q.answer,"explanation":q.explanation})).collect::<Vec<_>>();
@@ -1023,4 +1023,37 @@ pub fn authorize_answer(
 ) -> Result<(), String> {
     let _lock = IO.lock().map_err(|e| e.to_string())?;
     context.validate(&root(app)?, remote)
+}
+
+pub fn runtime_evidence(app:&AppHandle,context:AnswerContext,remote:bool,session_id:Option<&str>)->Result<AnswerContext,String>{
+    let (context,questions,passages)={
+        let _lock=IO.lock().map_err(|e|e.to_string())?;
+        context.sanitized(&root(app)?,remote)?
+    };
+    if questions>0||passages>0 {
+        super::history_commands::record_audit(app,session_id,"retrieval","已剔除失效依据，保留有效内容",json!({"removedQuestions":questions,"removedPassages":passages}));
+    }
+    Ok(context)
+}
+
+#[cfg(test)]
+mod evidence_tests{
+    use super::*;
+    #[test]
+    fn stale_item_does_not_erase_other_confirmed_answers_or_passages(){
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let q=kb::save_question(root,Question{id:uuid::Uuid::new_v4().to_string(),question:"项目职责".into(),answer:"负责验证".into(),status:"confirmed".into(),category:"项目问题".into(),..Default::default()}).unwrap();
+        let path=root.join("original.txt");std::fs::write(&path,"有效资料\n").unwrap();
+        let id=uuid::Uuid::new_v4().to_string();let hash=kb::digest(b"source");
+        let source=kb::Source{id:id.clone(),path:path.to_string_lossy().into_owned(),relative_path:"original.txt".into(),project:"A".into(),hash:hash.clone(),modified:kb::stamp(&path),status:"ready".into(),..Default::default()};
+        kb::save_library(root,&kb::Library{sources:vec![source],..Default::default()}).unwrap();
+        kb::atomic(&root.join("sources").join(format!("{id}.txt")),"有效资料\n".as_bytes()).unwrap();
+        let p=Passage{source_id:id,hash,project:"A".into(),path:"original.txt".into(),locator:"文档开头".into(),text:"有效资料\n".into()};
+        let mut stale=q.clone();stale.answer="已失效的答案版本".into();let mut bad=p.clone();bad.text="过期索引".into();
+        let context=AnswerContext{questions:vec![q.clone(),stale],passages:vec![p,bad],consent:true};
+        assert!(context.validate(root,true).is_err());
+        let (safe,nq,np)=context.sanitized(root,true).unwrap();assert_eq!((nq,np),(1,1));
+        assert_eq!(safe.questions[0].answer,q.answer);assert_eq!(safe.passages.len(),1);assert!(safe.validate(root,true).is_ok());
+        assert!(AnswerContext{consent:false,..safe}.sanitized(root,true).is_err());
+    }
 }

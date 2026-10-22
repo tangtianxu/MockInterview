@@ -387,6 +387,9 @@ pub fn chunks(text: &str) -> Vec<(String, String)> {
     let mut label = "文档开头".to_string();
     let mut lines = 0;
     for line in text.lines() {
+        // Imported text can contain CR-CR-LF after passing through Windows tools.
+        // Canonicalize line endings for both indexing and evidence validation.
+        let line=line.trim_end_matches('\r');
         let boundary = line.starts_with('#')
             || line.starts_with("[幻灯片 ")
             || line.starts_with("[PDF 第 ")
@@ -1099,6 +1102,7 @@ mod tests {
     }
     #[test]
     fn chunks_follow_slide_and_function_boundaries() {
+        assert_eq!(chunks("# Heading\r\r\nbody\r\r\n"),chunks("# Heading\nbody\n"));
         let text = format!(
             "[幻灯片 1]\n{}\n[幻灯片 2]\n{}",
             "甲".repeat(400),

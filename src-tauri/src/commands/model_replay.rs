@@ -73,7 +73,7 @@ async fn approved_dialogue_replay() {
             url.clone(),
         );
         async move {
-            let body = model_contract::body(&api, &model, name, system, &user, schema, 900);
+            let body = model_contract::body(&api, &model, name, system, &user, schema, if name=="submit_task"{1800}else{1000});
             let index = {
                 let mut s = ledger.lock().unwrap();
                 let rows = s["requests"].as_array_mut().unwrap();
@@ -201,13 +201,19 @@ async fn cached_dialogue_replay() {
     let mut report = Vec::new();
     for case in fixture["cases"].as_array().unwrap() {
         let input: task_harness::Input = serde_json::from_value(case["input"].clone()).unwrap();
-        let decision = task_harness::run(&input, |name, _, _, _| {
-            let value = case[if name == "submit_task" {
+        let decision = task_harness::run(&input, |name, _, _, body| {
+            let mut value = case[if name == "submit_task" {
                 "proposal"
             } else {
                 "verification"
             }]
             .clone();
+            // Translate old saved binary verdicts only for local cache replay.
+            if name=="verify_task"&&value["scores"].is_null(){
+                let n=serde_json::from_str::<Value>(&body).unwrap()["candidates"].as_array().unwrap().len();
+                let accept=value["verdict"]=="accept";
+                value=json!({"request_state":"complete","scores":(0..n).map(|i|json!({"candidate_id":i,"spoken_fit":4,"context_fit":4,"relations_preserved":accept,"reason":"saved legacy verdict"})).collect::<Vec<_>>()});
+            }
             async { Ok(value) }
         })
         .await

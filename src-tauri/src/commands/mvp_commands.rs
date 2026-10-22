@@ -194,9 +194,9 @@ pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionI
         let mut endpoint=endpoint.clone();
         if name=="verify_task"{endpoint.usage_stage=Some("语义任务核验".into());}
         let app=app.clone();
-        async move{contract_call(&app,&endpoint,name,system,schema,&user,900).await.map(|v|v.0)}
+        async move{contract_call(&app,&endpoint,name,system,schema,&user,if name=="submit_task"{1800}else{1000}).await.map(|v|v.0)}
     }).await;
-    let data=serde_json::json!({"version":2,"input":input,"decision":result.as_ref().ok(),"error":result.as_ref().err()});
+    let data=serde_json::json!({"version":3,"input":input,"decision":result.as_ref().ok(),"error":result.as_ref().err()});
     super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"decision",
         result.as_ref().map(|d|d.reason.as_str()).unwrap_or("判别失败"),data);
     result
@@ -235,12 +235,12 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     if let Some(context) = &practice_context { context.authorize(endpoint.api == "ollama")?; }
     // Evidence may go stale between recall and streaming. Drop invalid evidence
     // before any remote request, but never veto the accepted question itself.
-    let knowledge_context=knowledge_context.filter(|context|{
-        match super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama"){
-            Ok(())=>true,
+    let knowledge_context=knowledge_context.and_then(|context|{
+        match super::knowledge_commands::runtime_evidence(&app,context,endpoint.api!="ollama",endpoint.history_session_id.as_deref()){
+            Ok(context)=>if context.questions.is_empty()&&context.passages.is_empty(){None}else{Some(context)},
             Err(reason)=>{
                 super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","资料增强降级",serde_json::json!({"reason":reason,"continued":true}));
-                false
+                None
             }
         }
     });
@@ -273,7 +273,7 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
             "think":false,"options":{"temperature":0.2,"num_predict":token_limit}})
     } else if endpoint.api == "deepseek" {
-        serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
+        serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,"temperature":0.2,
             "thinking":{"type":"disabled"},"max_tokens":token_limit,"stream_options":{"include_usage":true}})
     } else {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
@@ -430,7 +430,7 @@ pub struct PracticeRequest {
 }
 
 #[command]
-pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: PracticeRequest)
+pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, mut input: PracticeRequest)
     -> Result<serde_json::Value, String> {
     if !matches!(input.action.as_str(), "analyze" | "ask" | "evaluate") {
         return Err("未知的练习动作".into());
@@ -441,7 +441,9 @@ pub async fn practice_model(app: AppHandle, endpoint: ModelEndpoint, input: Prac
         return Err("练习范围、难度或时长无效".into());
     }
     input.context.authorize(endpoint.api == "ollama")?;
-    if let Some(context)=&input.knowledge_context {super::knowledge_commands::authorize_answer(&app,context,endpoint.api!="ollama")?;}
+    input.knowledge_context=input.knowledge_context.take().and_then(|context|
+        super::knowledge_commands::runtime_evidence(&app,context,endpoint.api!="ollama",endpoint.history_session_id.as_deref()).ok())
+        .filter(|context|!context.questions.is_empty()||!context.passages.is_empty());
     if input.action == "ask" && matches!(input.context.scope.as_str(), "project" | "mixed" | "comprehensive") && input.context.resume_analysis.trim().is_empty() {
         return Err("项目、混合或综合练习需要先分析简历".into());
     }

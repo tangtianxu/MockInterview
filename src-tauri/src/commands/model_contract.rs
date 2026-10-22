@@ -15,7 +15,7 @@ pub fn body(
         return json!({"model":model,"messages":messages,"stream":false,"think":false,
         "format":schema,"options":{"temperature":0,"num_predict":budget}});
     }
-    let mut body = json!({"model":model,"messages":messages,"stream":false,"max_tokens":budget,
+    let mut body = json!({"model":model,"messages":messages,"stream":false,"max_tokens":budget,"temperature":0,
         "tools":[{"type":"function","function":{"name":name,"description":"Submit the validated structured operation.","parameters":schema}}],
         "tool_choice":{"type":"function","function":{"name":name}}});
     if api == "deepseek" {
@@ -59,6 +59,8 @@ mod tests {
     use super::*;
     #[test]
     fn named_call_only_and_no_truncated_arguments() {
+        let body=body("deepseek","fixture","task","system","input",json!({"type":"object"}),900);
+        assert_eq!(body["temperature"],0);assert_eq!(body["thinking"]["type"],"disabled");
         let good = json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"submit_task","arguments":"{\"ok\":true}"}}]},"finish_reason":"tool_calls"}]});
         assert_eq!(parse("deepseek", "submit_task", &good).unwrap()["ok"], true);
         assert!(parse("deepseek", "other", &good).is_err());

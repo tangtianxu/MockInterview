@@ -24,5 +24,7 @@ pub mod knowledge_commands;
 pub(crate) mod practice_protocol;
 mod answer_stream;
 pub(crate) mod task_harness;
+mod speech_interpretation;
 pub(crate) mod model_contract;
 #[cfg(test)] mod model_replay;
+#[cfg(test)] mod history_pipeline_replay;

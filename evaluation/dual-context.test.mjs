@@ -45,6 +45,21 @@ test('dual and microphone-only transcription route questions and preserve contex
  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:1360,height:850}});page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(String(e)));
  async function load(query=''){await page.goto(url+query,{waitUntil:'domcontentloaded',timeout:30000});await page.getByRole('button',{name:'双击切换练习与实时提示页面'}).dblclick();await page.getByRole('button',{name:'开始聆听',exact:true}).click();await page.getByRole('button',{name:'结束练习',exact:true}).waitFor();}
  async function speech(speaker,id,text,time,final=true){await page.evaluate(({speaker,id,text,time,final})=>window.send(final?'transcript_final':'transcript_update',{segment:{id,text,speaker,timestamp_ms:time,is_final:final}}),{speaker,id,text,time,final});}
+ // Unfinished requests carry exact evidence to the next ASR event, then clear.
+ await load('?offline=1');
+ const pending=[{turn_id:'fragment',quote:'请介绍一下'}];
+ await page.evaluate(p=>window.decisions.push({intent:'incomplete',relation:'none',action:'wait',question:'',pending_evidence:p}),pending);
+ await speech('Them','fragment','请介绍一下',100);
+ await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===1);
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),0);
+ await page.evaluate(()=>window.decisions.push({intent:'question',relation:'new',action:'show',question:'请介绍一下这个项目',focus:[],key_terms:[],constraints:[],uncertain_terms:[],evidence:[{turn_id:'subject',quote:'这个项目'}]}));
+ await speech('Them','subject','这个项目',200);
+ await page.locator('.answer-text').filter({hasText:'请介绍一下这个项目'}).waitFor();
+ assert.deepEqual(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide')[1].args.input.pendingEvidence),pending);
+ await speech('Them','new-task','你具体负责什么',300);
+ await page.waitForFunction(()=>window.calls.filter(x=>x.command==='mvp_decide').length===3);
+ const carried=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide')[2].args.input);
+ assert.deepEqual(carried.pendingEvidence,[]);assert.deepEqual(carried.previousEvidence,[{turn_id:'subject',quote:'这个项目'}]);
  // Existing profiles without an interval get the new 5-second default.
  await load('?throttle=1');
  for(let i=0;i<25;i++)await speech('Them','burst','PPO 是什'+i,100,false);
@@ -212,9 +227,9 @@ test('dual and microphone-only transcription route questions and preserve contex
   await page.getByRole('button',{name:'完成设置',exact:true}).click();
  }
  await load('?emptyIntro=1');await speech('Them','intro-empty','请介绍一下你自己',1);
- await page.locator('.answer-text').filter({hasText:'尚未保存自我介绍'}).waitFor();
- assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),0);
+ await page.locator('.answer-text').filter({hasText:'请进行自我介绍的技术解释'}).waitFor();
+ assert.equal(await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').length),1);
  await page.getByRole('button',{name:'结束练习',exact:true}).click();
  assert.deepEqual(errors,[]);
- }finally{await browser?.close();server.kill();await unlink(fixture).catch(()=>{});}
+ }catch(error){error.message+='\nVite output:\n'+output;throw error;}finally{await browser?.close();server.kill();await unlink(fixture).catch(()=>{});}
 });

@@ -64,7 +64,7 @@ type ModelInfo = { id: string; name: string; is_downloaded: boolean; is_streamin
 type EngineInfo = { engine: string; name: string; models: ModelInfo[] };
 type Segment = { id: string; text: string; speaker: string; timestamp_ms: number; is_final: boolean };
 type Decision = { intent: string; relation: string; action: "wait" | "show" | "revise" | "keep"; question: string;
-  focus: string[]; key_terms: string[]; constraints: string[]; uncertain_terms: string[]; evidence?:{turn_id:string;quote:string}[] };
+  focus: string[]; key_terms: string[]; constraints: string[]; uncertain_terms: string[]; evidence?:{turn_id:string;quote:string}[];pending_evidence?:{turn_id:string;quote:string}[] };
 type OverlayState = { question: string; hint: string; status: Status; locked: boolean;
   uncertainTerms: string[]; keyTerms: string[]; detail: string; detailLoading: boolean; detailAvailable?:boolean; coding?:boolean };
 type PracticePreview = {question:string;hint:string};
@@ -395,6 +395,8 @@ function Main() {
   const micPartialRef = useRef<Segment|null>(null);
   const savedIntroductionRef = useRef(false);
   const questionRef = useRef("");
+  const acceptedEvidenceRef=useRef<{question:string;evidence:{turn_id:string;quote:string}[]}>({question:"",evidence:[]});
+  const pendingEvidenceRef=useRef<{turn_id:string;quote:string}[]>([]);
   const visibleQuestionRef = useRef("");
   const visibleTermsRef = useRef<string[]>([]);
   const visibleKeyTermsRef = useRef<string[]>([]);
@@ -1023,6 +1025,7 @@ function Main() {
   const startAnswer = useCallback(async (nextQuestion: string, focus: string[], keyTerms: string[],
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
     if(softwareUpdatingRef.current || modelRemovalRef.current)return;
+    pendingEvidenceRef.current=[];
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
@@ -1192,6 +1195,8 @@ function Main() {
       const decision = await invoke<Decision>("mvp_decide", {
         endpoint:await liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别",()=>runningRef.current&&epoch===sessionEpochRef.current),
         input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,
+          previousEvidence:acceptedEvidenceRef.current.question===questionRef.current?acceptedEvidenceRef.current.evidence:[],
+          pendingEvidence:pendingEvidenceRef.current,
           projectKnowledge:knowledgeEnabledRef.current,
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
             settingsRef.current.decision.api==="ollama") },
@@ -1199,6 +1204,7 @@ function Main() {
       const taskSource=decisionEvidenceSource(pending,(decision.evidence||[]).map(e=>e.turn_id));
       const elapsed=Math.round(performance.now()-started);
       if (!runningRef.current || epoch !== sessionEpochRef.current) return;
+      pendingEvidenceRef.current=decision.pending_evidence||[];
       if (manualOverrideSourceRef.current && taskSource.sourceId === manualOverrideSourceRef.current) {
         logDiagnostic("保留手动修正",`忽略同一转录片段的判别 · ${elapsed} ms`);
         if (!answerRequestRef.current) setStatus("listening");
@@ -1211,6 +1217,7 @@ function Main() {
       // snapshot can still produce an early, revisable hint; the queued text
       // is judged next. A stopped session is never allowed to update the UI.
       if (decision.intent==="self_introduction" && (decision.action==="show" || decision.action==="revise")) {
+        acceptedEvidenceRef.current={question:decision.question,evidence:decision.evidence||[]};
         if(answerTaskRef.current!=="self_introduction" || activeSourceRef.current!==taskSource.sourceId)showSelfIntroduction(taskSource.sourceId,taskSource.receivedAt);
       } else if (decision.action === "show" || decision.action === "revise") {
         // Metadata changes alone do not justify regenerating the same question.
@@ -1231,6 +1238,7 @@ function Main() {
         const keyTerms = [...new Set((decision.key_terms || []).map(term => term.trim()).filter(Boolean))].slice(0,3);
         const task = JSON.stringify([decision.question,decision.focus || [],keyTerms,decision.constraints || [],decision.uncertain_terms || []]);
         if (task !== answerTaskRef.current) {
+          acceptedEvidenceRef.current={question:decision.question,evidence:decision.evidence||[]};
           logDiagnostic("更新回答任务",`${transition} · ${decision.action}/${decision.relation}`);
           manualOverrideSourceRef.current="";
           if (transition === "revision") revisedSourceRef.current=taskSource.sourceId;
@@ -1430,6 +1438,8 @@ function Main() {
       segmentsRef.current=[];setSegments([]);setPartial(null);partialRef.current=null;
       micPartialRef.current=null;setMicPartial(null);savedIntroductionRef.current=false;
       questionRef.current="";activeSourceRef.current="";
+      acceptedEvidenceRef.current={question:"",evidence:[]};
+      pendingEvidenceRef.current=[];
       revisedSourceRef.current="";manualOverrideSourceRef.current="";
       answerDisplayRef.current=null;pendingDisplayRef.current=null;
       pendingHintRef.current="";answerTaskRef.current="";detailRequestRef.current="";
