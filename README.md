@@ -1,8 +1,8 @@
 # 模拟面试练习 · MockInterview
 
-当前版本：1.0.34。
+当前版本：1.0.35。
 
-[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.34/MockInterview_1.0.34_x64-setup.exe) · [查看 1.0.34 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.34)
+[下载 Windows 64 位安装包](https://github.com/tangtianxu/MockInterview/releases/download/v1.0.35/MockInterview_1.0.35_x64-setup.exe) · [查看 1.0.35 发布说明](https://github.com/tangtianxu/MockInterview/releases/tag/v1.0.35)
 
 面向 Windows 10 / 11 的中文技术面试练习桌面应用。用户设置目标岗位、关注主题、练习范围、难度和时长后，模型逐题扮演面试官；用户可以输入回答，也可以用麦克风转写回答。每题提交后，应用显示参考评分、回答中的实际片段，以及值得进一步说明的方面。
 
@@ -298,6 +298,8 @@ API 密钥单独保存在 Windows 凭据管理器中，不写入可导出的配�
 题目区分项目问题、技术基础、开放型问题、行为与经历、个人介绍与求职；分类与补充字段在编辑页的更多信息中管理。每题可以维护回答、其他问法、来源和追问，没有总题数上限。同一任务的不同问法可以合并，不同任务保留。历史会话导出问题时只默认选择本场问题，避免混入之前待检查的内容。
 
 固定说明需要相应 Agent 的文件能力，不能让普通聊天 API 自动读取用户电脑。扫描件、图片和旧 Office 格式仍需 OCR 或转换。引用相符只证明原文存在，不能证明整份答案正确或个人做过全部工作。用户应核对个人贡献、完成状态和测试结果后采用。
+
+希望让电脑上的 GPT 从查找简历与项目开始，一直完成岗位资料、自我介绍与问答准备，可直接把 [GPT个性化配置指南](docs/GPT个性化配置指南.md) 交给它。软件“使用指南”的路线 B 也提供“保存GPT配置指南”按钮。用户只需说明材料位置、目标岗位，并核对个人事实。
 
 ### 处理与保存
 

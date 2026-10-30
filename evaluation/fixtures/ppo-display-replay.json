@@ -1,0 +1,17 @@
+{
+  "description": "2026-10-30 PPO answer visibility regression. Generic question/answer excerpt only; private context and original IDs omitted. Cached output, no API requests.",
+  "transcript": "OK那您这 OK呃那您这边的话能够大概简述一下就是 PPO底层的一个算法原理大概是什么样子",
+  "decision": {
+    "intent": "question",
+    "relation": "new",
+    "action": "show",
+    "question": "请简述一下 PPO 底层的算法原理大概是什么样子？",
+    "focus": [],
+    "key_terms": [],
+    "constraints": [],
+    "uncertain_terms": [
+      "听写按“请简述一下 PPO 底层的算法原理大概是什么样子？”理解"
+    ]
+  },
+  "answer": "定义：PPO（Proximal Policy Optimization，近端策略优化）是一种基于策略梯度的强化学习算法，属于 Actor-Critic（演员-评论家）框架。它用“裁剪的重要性采样比”限制每次策略更新的幅度，在样本效率与训练稳定性之间取得平衡。\n\n原理：用当前策略采样轨迹，计算优势函数 \\(\\hat{A}_t\\)（常用 GAE，广义优势估计），再最大化裁剪目标\n\\[\nL^{\\text{CLIP}}(\\theta)=\\mathbb{E}_t\\left[\\min\\left(r_t(\\theta)\\hat{A}_t,\\ \\operatorname{clip}\\left(r_t(\\theta),1-\\epsilon,1+\\epsilon\\right)\\hat{A}_t\\right)\\right]\n\\]\n其中 \\(r_t(\\theta)=\\frac{\\pi_\\theta(a_t\\mid s_t)}{\\pi_{\\theta_{\\text{old}}}(a_t\\mid s_t)}\\) 是新旧策略的动作概率比，\\(\\epsilon\\) 是裁剪范围（常取 0.1–0.2）。当优势为正时，比值超过 \\(1+\\epsilon\\) 就不再奖励；优势为负时，比值低于 \\(1-\\epsilon\\) 就不再惩罚，从而避免一步更新过大。实际训练还联合价值损失 \\(L^{VF}\\) 和策略熵正则 \\(S[\\pi_\\theta]\\)，总目标约为 \\(L^{\\text{CLIP}}-c_1L^{VF}+c_2S[\\pi_\\theta]\\)，并对同一批数据做多轮小批量更新。\n\n补充：PPO 有 clip 和 KL 惩罚两种常见变体，工程上 clip 版更常用；它属于 on-policy（同策略）方法，采样数据用完后通常丢弃。"
+}

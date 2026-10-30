@@ -567,7 +567,7 @@ pub fn knowledge_assign_projects(app:AppHandle,assignments:Vec<crate::knowledge_
     let _lock=IO.lock().map_err(|e|e.to_string())?;let base=root(&app)?;crate::knowledge_intake::assign_projects(&base,&assignments)?;kb::snapshot(&base)
 }
 #[command]
-pub fn knowledge_agent_prompt(kind:String)->Result<String,String>{match kind.as_str(){"materials"=>Ok(crate::knowledge_intake::agent_material_prompt()),"bank"=>Ok(crate::knowledge_intake::agent_bank_prompt()),_=>Err("Agent提示词类型无效".into())}}
+pub fn knowledge_agent_prompt(kind:String)->Result<String,String>{match kind.as_str(){"materials"=>Ok(crate::knowledge_intake::agent_material_prompt()),"bank"=>Ok(crate::knowledge_intake::agent_bank_prompt()),"setup"=>Ok(include_str!("../../../docs/GPT个性化配置指南.md").into()),_=>Err("Agent提示词类型无效".into())}}
 #[command]
 pub fn knowledge_export_agent_prompt(path:String,kind:String)->Result<(),String>{
     let file=Path::new(&path);if !file.is_absolute()||!file.extension().is_some_and(|e|e=="txt"||e=="md"){return Err("请选择TXT或MD提示词保存路径".into());}kb::atomic(file,knowledge_agent_prompt(kind)?.as_bytes())
@@ -1039,6 +1039,13 @@ pub fn runtime_evidence(app:&AppHandle,context:AnswerContext,remote:bool,session
 #[cfg(test)]
 mod evidence_tests{
     use super::*;
+    #[test]
+    fn setup_guide_exports_complete_bundled_markdown(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("GPT配置指南.md");
+        knowledge_export_agent_prompt(path.to_string_lossy().into_owned(),"setup".into()).unwrap();
+        let text=std::fs::read_to_string(path).unwrap();assert_eq!(text,include_str!("../../../docs/GPT个性化配置指南.md"));
+        for step in ["导入Agent整理目录","导出Agent工作包","导入Agent结果文件夹","自我介绍","目标岗位","实际测试"]{assert!(text.contains(step),"Missing setup step: {step}");}
+    }
     #[test]
     fn stale_item_does_not_erase_other_confirmed_answers_or_passages(){
         let dir=tempfile::tempdir().unwrap();let root=dir.path();

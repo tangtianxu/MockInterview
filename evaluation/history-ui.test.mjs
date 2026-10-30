@@ -26,13 +26,13 @@ test('practice history survives reload, searches and exports; stable-only mode s
  return null;
  },{shouldMockEvents:true});createRoot(document.getElementById('root')).render(React.createElement(App));
  </script></body></html>`);
- const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','5201','--strictPort'],{windowsHide:true,stdio:'pipe'});let output='';server.stdout.on('data',s=>output+=s);server.stderr.on('data',s=>output+=s);let browser;
+ const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--configLoader','runner','--host','127.0.0.1','--port','5201','--strictPort'],{windowsHide:true,stdio:'pipe'});let output='';server.stdout.on('data',s=>output+=s);server.stderr.on('data',s=>output+=s);let browser;
  try{const url='http://127.0.0.1:5201/'+fixture;for(let i=0;i<80;i++){if(server.exitCode!==null)throw Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
- browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage();page.on('pageerror',error=>console.log('Fixture error:',error.message));page.setDefaultTimeout(6000);page.setDefaultNavigationTimeout(20000);await page.goto(url);
+ browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage();page.on('pageerror',error=>console.log('Fixture error:',error.message));page.setDefaultTimeout(6000);page.setDefaultNavigationTimeout(30000);await page.goto(url,{waitUntil:'domcontentloaded'});
  await page.getByRole('button',{name:'开始练习',exact:true}).click();await page.locator('#practice-answer').fill('我回答了 PPO');await page.getByRole('button',{name:'提交回答',exact:true}).click();
  await page.waitForFunction(()=>Object.values(window.saved.entries).some(entries=>entries.some(e=>e.kind==='answer'&&e.data.complete===true)));
  await page.getByRole('button',{name:'结束练习',exact:true}).click();await page.waitForFunction(()=>window.saved.sessions[0].endedAt);
- await page.reload();await page.getByRole('button',{name:'历史',exact:true}).click();await page.locator('.history-session').first().click();
+ await page.reload({waitUntil:'domcontentloaded'});await page.getByRole('button',{name:'历史',exact:true}).click();await page.locator('.history-session').first().click();
  assert.match(await page.locator('.history-detail').innerText(),/近端策略优化/);assert.match(await page.locator('.history-detail').innerText(),/我回答了 PPO/);
  await page.getByRole('textbox',{name:'关键词'}).fill('不存在的关键词');await page.getByRole('button',{name:'查询 / 刷新'}).click();await page.waitForFunction(()=>!document.querySelector('.history-session'));
  await page.getByRole('textbox',{name:'关键词'}).fill('PPO');await page.getByRole('button',{name:'查询 / 刷新'}).click();await page.locator('.history-session').click();
