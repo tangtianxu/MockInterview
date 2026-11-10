@@ -59,16 +59,16 @@ fn endpoint_url(endpoint: &ModelEndpoint, path: &str) -> Result<String, String> 
     Ok(format!("{base}{suffix}"))
 }
 
-fn client(timeout_secs: u64, endpoint: &ModelEndpoint) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::none());
-    // Windows may have a system proxy even when HTTP_PROXY is unset. A local
-    // model service must always be reached directly through loopback.
-    let url = reqwest::Url::parse(&endpoint.base_url).map_err(|e| e.to_string())?;
-    if matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")) {
-        builder = builder.no_proxy();
-    }
-    builder.build().map_err(|e| e.to_string())
+fn client(timeout_secs: u64, endpoint: &ModelEndpoint) -> Result<super::model_transport::ModelClient, String> {
+    super::model_transport::client(&endpoint.base_url,timeout_secs)
+}
+
+/// Prepare local TLS/proxy transport state while evidence is being read. This
+/// sends no HTTP request, looks up no credential and incurs no model usage.
+#[command]
+pub async fn mvp_prepare_model_transport(endpoint:ModelEndpoint)->Result<(),String>{
+    endpoint_url(&endpoint,"chat")?;
+    tauri::async_runtime::spawn_blocking(move||client(180,&endpoint).map(|_|())).await.map_err(|e|e.to_string())?
 }
 
 fn credential(app: &AppHandle, endpoint: &ModelEndpoint) -> Result<Option<String>, String> {
@@ -141,6 +141,7 @@ pub async fn mvp_list_models(app: AppHandle, endpoint: ModelEndpoint) -> Result<
 /// implement chat completions but do not expose a model-list endpoint.
 #[command]
 pub async fn mvp_test_model_endpoint(app: AppHandle, endpoint: ModelEndpoint, structured:Option<bool>) -> Result<(), String> {
+    super::model_transport::reset(&endpoint.base_url)?;
     if structured.unwrap_or(false){
         let schema=serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean","enum":[true]}},"required":["ok"],"additionalProperties":false});
         let (value,_)=contract_call(&app,&endpoint,"connection_probe","调用connection_probe，ok=true。",schema,"检测结构化连接；不含个人资料。",64).await?;

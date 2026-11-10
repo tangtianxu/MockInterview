@@ -1022,6 +1022,7 @@ function Main() {
     cancelAnswer();
     const settings=settingsRef.current;
     const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
+    const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
     const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
     liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
     // Accepted tasks advance even while evidence is loading. A later transcript
@@ -1042,6 +1043,9 @@ function Main() {
     // already generated answer throughout the entire reply.
     setQuestion(nextQuestion);setUncertainTerms(terms);setKeyTerms(keyTerms);setAnswerSource("guide");
     publishHint("回答思路：先直接回应当前问题，再说明依据和关键步骤。涉及个人经历时，按项目目标、本人工作、技术方法和结果组织；只使用已确认的事实，尚不清楚的细节明确留待补充。");
+    // Prepare transport concurrently with disk retrieval, without sending a
+    // speculative model request or using incomplete project evidence.
+    const transportReady=Promise.allSettled(configs.map(config=>invoke("mvp_prepare_model_transport",{endpoint:endpoint(config,"answer")})));
     let knowledgeContext:KnowledgeContext|undefined;
     const stillCurrent=()=>answerRequestRef.current===requestId&&!softwareUpdatingRef.current;
     {
@@ -1063,7 +1067,8 @@ function Main() {
         knowledgeContext=result.context;knowledgeAnswerRef.current=!!knowledgeContext;
       }catch(cause){if(!stillCurrent())return;logDiagnostic("资料增强降级",String(cause));liveHistory.record("retrieval",String(cause),{query:nextQuestion,continued:true});}
     }
-    const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
+    await transportReady;
+    if(!stillCurrent())return;
     const requests=configs.map((config,index)=>({id:`${requestId}-${index}`,
       source:(config.api==="ollama" ? "local" : "api") as AnswerSource}));
     const race=new AnswerRace(requests);answerRaceRef.current=race;

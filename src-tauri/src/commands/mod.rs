@@ -23,6 +23,7 @@ pub mod history_commands;
 pub mod knowledge_commands;
 pub(crate) mod practice_protocol;
 mod answer_stream;
+mod model_transport;
 pub(crate) mod task_harness;
 mod speech_interpretation;
 pub(crate) mod model_contract;

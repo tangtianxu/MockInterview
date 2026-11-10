@@ -453,6 +453,7 @@ pub fn run() {
             mvp_commands::mvp_copy_model_key,
             mvp_commands::mvp_decide,
             mvp_commands::mvp_answer,
+            mvp_commands::mvp_prepare_model_transport,
             commands::screen_commands::capture_code_screen,
             knowledge_commands::knowledge_snapshot,
             knowledge_commands::knowledge_record_read,
