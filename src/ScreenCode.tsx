@@ -149,8 +149,8 @@ export function ScreenShortcutEditor({value,forbidden,onSave,onRecording}:{value
  return <div className="screen-shortcut-setting"><label>截屏解题快捷键（面试助手模式）<input ref={input} aria-label="截屏解题快捷键" readOnly value={recording?(draft||"请按下功能键…"):value} onKeyDown={event=>{
   if(!recording)return;event.preventDefault();event.stopPropagation();
   if(event.key==="Escape"){stop();return;}
-  if(!event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&/^F(?:[1-9]|1[0-2])$/.test(event.code)){setDraft(event.code);setError("");}
+  if(!event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&/^F(?:[1-9]|1[01])$/.test(event.code)){setDraft(event.code);setError("");}
  }}/></label><div className="key-actions">{!recording?<button onClick={()=>{setDraft("");setError("");setRecording(true);onRecording(true);}}>更改截屏键</button>:<>
   <button disabled={!draft} onClick={()=>{if(forbidden.includes(draft)){setError("该快捷键已用于退出或恢复任务栏。");return;}onSave(draft);stop();}}>保存截屏键</button><button onClick={stop}>取消</button></>}</div>
-  <p className="setting-help">默认单键 F8。可以换成 F1–F12，录入时按 Esc 取消。仅在面试助手页面注册；冲突时会提示更换。</p>{error&&<p className="error-box" role="alert">{error}</p>}</div>;
+  <p className="setting-help">默认单键 F8。可以换成 F1–F11，录入时按 Esc 取消。仅在面试助手页面注册；冲突时会提示更换。</p>{error&&<p className="error-box" role="alert">{error}</p>}</div>;
 }

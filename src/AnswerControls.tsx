@@ -3,7 +3,7 @@ import {register,unregister} from '@tauri-apps/plugin-global-shortcut';
 import {AnswerDeck,type AnswerPage} from './answerDeck';
 export type AnswerKeys={lock:string;previous:string;next:string;api:string};
 export const DEFAULT_ANSWER_KEYS:AnswerKeys={lock:'F6',previous:'F7',next:'F9',api:'F4'};
-export const FUNCTION_KEYS=Array.from({length:12},(_,i)=>'F'+(i+1));
+export const FUNCTION_KEYS=Array.from({length:11},(_,i)=>'F'+(i+1));
 export function normalizeAnswerKeys(old:Partial<AnswerKeys>|undefined,forbidden:string[]){
  const used=new Set(forbidden);const next={...DEFAULT_ANSWER_KEYS};
  for(const k of Object.keys(next) as (keyof AnswerKeys)[]){const wanted=old?.[k];const value=[wanted,DEFAULT_ANSWER_KEYS[k],...FUNCTION_KEYS].find(v=>!!v&&FUNCTION_KEYS.includes(v)&&!used.has(v))!;next[k]=value;used.add(value);}return next;

@@ -80,7 +80,7 @@ const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在
 const defaults: Settings = {
   mode: "live", output: "default", mic: "default", sttMode: "local", sttEngine: "sherpa_bilingual", sttModel: "paraformer-zh-en",
   sttApiProvider: "groq_whisper", sttApiModel: "whisper-large-v3-turbo", domain: "general",
-  launcherOnTop: false, quitShortcut: "F12", screenShortcut:DEFAULT_SCREEN_SHORTCUT, screenCodeLanguage:"Python 3",
+  launcherOnTop: false, quitShortcut: "F11", screenShortcut:DEFAULT_SCREEN_SHORTCUT, screenCodeLanguage:"Python 3",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
   micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,decisionIntervalSeconds:5,
@@ -1999,7 +1999,7 @@ function Main() {
               <button onClick={()=>{setRecordingQuitShortcut(false);setQuitShortcutDraft("");}}>取消</button>
             </>}
           </div>
-          <p className="setting-help">默认 F12。录入时直接按单个 F1–F12；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
+          <p className="setting-help">默认 F11。录入时直接按单个 F1–F11；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
           <AnswerKeySettings value={settings.answerKeys} forbidden={[settings.quitShortcut,settings.screenShortcut,restoreShortcutRef.current]} onChange={answerKeys=>update({answerKeys})} error={answerKeyError}/>
           <ScreenShortcutEditor value={settings.screenShortcut} forbidden={[settings.quitShortcut,restoreShortcutRef.current,...Object.values(settings.answerKeys)]} onSave={value=>update({screenShortcut:value})} onRecording={setRecordingScreenShortcut}/>
