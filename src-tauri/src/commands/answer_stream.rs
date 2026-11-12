@@ -41,6 +41,13 @@ impl AnswerStream {
     pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
         self.pending.extend_from_slice(bytes);
         let mut tokens = Vec::new();
+        // Some compatible gateways send a JSON error body with HTTP 200 and
+        // leave the connection open. A complete explicit error needs no newline.
+        if !self.ollama && self.pending.iter().copied().find(|b|!b.is_ascii_whitespace())==Some(b'{') {
+            if let Ok(value)=serde_json::from_slice::<serde_json::Value>(&self.pending){
+                if !value["error"].is_null(){self.error=Some("回答服务返回错误，内容未生成完；请检查模型连接后重试。");}
+            }
+        }
         while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<_> = self.pending.drain(..=index).collect();
             self.line(&line, &mut tokens);
@@ -55,7 +62,7 @@ impl AnswerStream {
         tokens
     }
 
-    pub fn is_finished(&self) -> bool { self.ended }
+    pub fn is_finished(&self) -> bool { self.ended || self.error.is_some() }
 
     pub fn timings(&self) -> &[(&'static str, u64)] { &self.timings }
     pub fn usage(&self)->Option<&serde_json::Value>{self.usage.as_ref()}
@@ -69,6 +76,7 @@ impl AnswerStream {
     }
 
     fn line(&mut self, bytes: &[u8], tokens: &mut Vec<String>) {
+        if self.error.is_some(){return;}
         let line = match std::str::from_utf8(bytes) {
             Ok(line) => line.trim(),
             Err(_) => { self.error.get_or_insert("回答服务返回了无效文字编码，内容可能不完整。请重新生成。"); return; }

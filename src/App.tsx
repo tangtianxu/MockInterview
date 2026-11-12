@@ -20,7 +20,10 @@ import {AnswerText} from "./AnswerText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {InAppActions} from "./ActionPanel";
 import {useHistoryRecorder} from "./history";
-import {FallbackSettings,backupEndpoint,type BackupSettings} from './FallbackSettings';
+import {FallbackSettings,type BackupSettings} from './FallbackSettings';
+import {runtimeModels} from './runtimeModels';
+import {AnswerControls,AnswerKeySettings,useAnswerDeck,useAnswerKeys,normalizeAnswerKeys,FUNCTION_KEYS,DEFAULT_ANSWER_KEYS,type AnswerKeys} from './AnswerControls';
+import type {AnswerPage} from './answerDeck';
 import {recognitionAttachment,type TaskAttachment} from './taskContext';
 import {HistoryView} from "./HistoryView";
 import {KnowledgeView} from "./KnowledgeView";
@@ -51,7 +54,7 @@ type Settings = {
   decision: ModelConfig; answer: ModelConfig; answerInstructions: string;
   sharedModelConnection: boolean; separateDecision?: ModelConfig;
   parallelAnswer: boolean; parallelLocal: ModelConfig;
-  backup:BackupSettings;recordAudio:boolean;
+  backup:BackupSettings;recordAudio:boolean;answerKeys:AnswerKeys;
   launcherOnTop: boolean; quitShortcut: string; screenShortcut:string; screenCodeLanguage:string;
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
@@ -77,14 +80,14 @@ const ANSWER_PROMPT_EXAMPLE = "我是一名 XX 方向的研究生，目前正在
 const defaults: Settings = {
   mode: "live", output: "default", mic: "default", sttMode: "local", sttEngine: "sherpa_bilingual", sttModel: "paraformer-zh-en",
   sttApiProvider: "groq_whisper", sttApiModel: "whisper-large-v3-turbo", domain: "general",
-  launcherOnTop: false, quitShortcut: "Control+Backquote", screenShortcut:DEFAULT_SCREEN_SHORTCUT, screenCodeLanguage:"Python 3",
+  launcherOnTop: false, quitShortcut: "F12", screenShortcut:DEFAULT_SCREEN_SHORTCUT, screenCodeLanguage:"Python 3",
   compactView: false, transcriptVisible: true, answerVisible: true, theme: "dark", opacity: 100,
   targetRole: "", focusTopics: "", resumePath: "",
   micTranscription:true, selfIntroduction:"",decisionFinalOnly:false,decisionIntervalSeconds:5,
   decision: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answer: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answerInstructions: "",
-  backup:{enabled:false,model:serviceDefaults("dashscope"),wait:12},recordAudio:true,
+  backup:{enabled:false,model:serviceDefaults("dashscope"),wait:3,policyVersion:2},recordAudio:true,answerKeys:DEFAULT_ANSWER_KEYS,
   sharedModelConnection: true,
   parallelAnswer: false, parallelLocal: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"manual"},
 };
@@ -110,14 +113,17 @@ function loadSettings(input?: unknown): Settings {
     const answer=normalize({...defaults.answer,...shared,model:old.answerModel || legacyDefaults.model,...old.answer,
       modelSelection:old.answer?.modelSelection || (old.answer || old.answerModel || old.api ? "manual" : "auto")});
     const sharedModelConnection=sharedConnectionDefault(old);
+    const screenShortcut=FUNCTION_KEYS.includes(old.screenShortcut)?old.screenShortcut:DEFAULT_SCREEN_SHORTCUT;
+    const quitShortcut=FUNCTION_KEYS.includes(old.quitShortcut)&&old.quitShortcut!==screenShortcut?old.quitShortcut:FUNCTION_KEYS.slice().reverse().find(k=>k!==screenShortcut)!;
+    const answerKeys=normalizeAnswerKeys(old.answerKeys,[quitShortcut,screenShortcut,'F10']);
     return {...defaults,...old,sttEngine,sttModel,sharedModelConnection,
       mode:old.mode === "video" || old.mode === "offline" ? old.mode : "live",
       micTranscription:old.micTranscription!==false,
       decisionFinalOnly:old.decisionFinalOnly===true,
       decisionIntervalSeconds:decisionIntervalSeconds(old.decisionIntervalSeconds),
       selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
-      backup:{enabled:old.backup?.enabled===true,model:{...defaults.backup.model,...old.backup?.model},wait:[8,12,20,30,60].includes(old.backup?.wait)?old.backup.wait:12},
-      recordAudio:old.recordAudio!==false,
+      backup:{enabled:old.backup?.enabled===true,model:{...defaults.backup.model,...old.backup?.model},wait:[2,3,5,8,12,20,30,60].includes(old.backup?.wait)?(old.backup.policyVersion!==2&&old.backup.wait===12?3:old.backup.wait):3,policyVersion:2},
+      recordAudio:old.recordAudio!==false,answerKeys,
       parallelAnswer:old.parallelAnswer===true,
       parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
       targetRole:typeof old.targetRole === "string" ? old.targetRole.slice(0,120) :
@@ -126,8 +132,7 @@ function loadSettings(input?: unknown): Settings {
         (typeof previousPractice.topics === "string" ? previousPractice.topics.slice(0,300) : ""),
       resumePath:typeof old.resumePath === "string" ? old.resumePath : "",
       answerInstructions:typeof old.answerInstructions === "string" ? old.answerInstructions.slice(0,1200) : "",
-      quitShortcut:typeof old.quitShortcut === "string" && old.quitShortcut ? old.quitShortcut : defaults.quitShortcut,
-      screenShortcut:typeof old.screenShortcut === "string" && /^(?:(?:Control|Alt|Shift)\+)*F(?:[1-9]|1[0-2])$/.test(old.screenShortcut)?old.screenShortcut:DEFAULT_SCREEN_SHORTCUT,
+      quitShortcut,screenShortcut,
       screenCodeLanguage:CODE_LANGUAGES.includes(old.screenCodeLanguage)?old.screenCodeLanguage:"Python 3",
       transcriptVisible:old.transcriptVisible !== false,
       answerVisible:old.answerVisible !== false,
@@ -164,13 +169,7 @@ function useAppVersion() {
 }
 
 function capturedShortcut(event: React.KeyboardEvent<HTMLInputElement>): string | null {
-  const key = event.code === "Backquote" ? "Backquote" :
-    /^Key[A-Z]$/.test(event.code) ? event.code.slice(3) :
-    /^Digit[0-9]$/.test(event.code) ? event.code.slice(5) :
-    /^F(?:[1-9]|1[0-2])$/.test(event.code) ? event.code : "";
-  const modifiers = [event.ctrlKey && "Control", event.altKey && "Alt", event.shiftKey && "Shift"]
-    .filter(Boolean) as string[];
-  return key && modifiers.length ? [...modifiers,key].join("+") : null;
+  return !event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&FUNCTION_KEYS.includes(event.code)?event.code:null;
 }
 
 function shortcutLabel(shortcut: string): string {
@@ -280,6 +279,9 @@ function Main() {
   const [workspaceMode, setWorkspaceMode] = useState<"practice" | "assist">("practice");
   const taskAttachmentRef=useRef<TaskAttachment|null>(null);
   const [answerView,setAnswerView]=useState<"voice"|"screen">("voice");
+  const [voicePageId,setVoicePageId]=useState('');
+  const [preferBackup,setPreferBackup]=useState(false);const preferBackupRef=useRef(false);
+  const [apiSwitchNotice,setApiSwitchNotice]=useState('');
   const [recordingScreenShortcut,setRecordingScreenShortcut]=useState(false);
   const [practiceSetupVisible,setPracticeSetupVisible] = useState(true);
   const [practiceFeedbackVisible,setPracticeFeedbackVisible] = useState(true);
@@ -302,6 +304,7 @@ function Main() {
   const [privacyBusy, setPrivacyBusy] = useState(false);
   const [restoreReady, setRestoreReady] = useState(false);
   const [recordingQuitShortcut, setRecordingQuitShortcut] = useState(false);
+  const shortcutRecordingRef=useRef(false);shortcutRecordingRef.current=recordingQuitShortcut||recordingScreenShortcut;
   const [quitShortcutDraft, setQuitShortcutDraft] = useState("");
   const [quitShortcutError, setQuitShortcutError] = useState("");
   const lastRegisteredShortcutRef = useRef("");
@@ -493,17 +496,24 @@ function Main() {
     }).then(unlisten=>{if(cancelled)unlisten();else stop=unlisten;});
     return()=>{cancelled=true;stop?.();};
   },[]);
+  const runtime=runtimeModels(settings,preferBackup);
+  const switchApi=useCallback(()=>{const config=settingsRef.current;if(!runtimeModels(config,true).usingBackup){setApiSwitchNotice('请先启用并配置备用 API');return;}const next=!preferBackupRef.current;preferBackupRef.current=next;setPreferBackup(next);setApiSwitchNotice('已切换，后续请求生效；当前生成继续');},[]);
   const screen=useScreenCode({enabled:workspaceMode==="assist",shortcutEnabled:profileReady&&!recordingQuitShortcut&&!recordingScreenShortcut,
-    blocked:()=>updater.busy||modelRemovalRef.current||knowledgeBusy||!profileReady,
-    shortcut:settings.screenShortcut,forbidden:[settings.quitShortcut,restoreShortcutRef.current],
-    language:settings.screenCodeLanguage,endpoint:endpoint(settings.answer,"answer"),history:liveHistory,
-    backupEndpoint:backupEndpoint(settings.backup),fallbackWaitSeconds:settings.backup.wait,
+    blocked:()=>updater.busy||modelRemovalRef.current||knowledgeBusy||!profileReady||shortcutRecordingRef.current,
+    shortcut:settings.screenShortcut,forbidden:[settings.quitShortcut,restoreShortcutRef.current,...Object.values(settings.answerKeys)],
+    language:settings.screenCodeLanguage,endpoint:runtime.answer,history:liveHistory,
+    backupEndpoint:runtime.backup,fallbackWaitSeconds:settings.backup.wait,
     onContext:value=>{if(value&&value.id!==taskAttachmentRef.current?.id){const question=`截图题目：${value.text.slice(0,1000)}`;questionRef.current=question;questionHistoryRef.current=rememberQuestion(questionHistoryRef.current,question).history;acceptedEvidenceRef.current={question,evidence:[]};}taskAttachmentRef.current=value;},
     onOpen:()=>{cancelAnswer();setAnswerView("screen");setSettings(current=>({...current,answerVisible:true}));}});
+  const screenPage:AnswerPage={id:screen.taskId,kind:'screen',question:screen.taskQuestion||'屏幕代码题',text:screen.answer,complete:screen.complete,source:'api',terms:[],keyTerms:[],detail:'',startedAt:screen.startedAt,asrAt:null};
+  const voicePage:AnswerPage={id:voicePageId,kind:'voice',question,text:hint,complete:completeMs!==null,source:answerSource||'',terms:uncertainTerms,keyTerms,detail,startedAt:answerStartedRef.current,asrAt:answerDisplayRef.current?.asrAt??null};
+  const currentPage=answerView==='screen'?screenPage:voicePage;
+  const deck=useAnswerDeck(currentPage,[voicePage,screenPage]);const pinned=deck.pinned;const shownPage=pinned||currentPage;
+  const answerKeyError=useAnswerKeys(settings.answerKeys,workspaceMode==='assist'&&profileReady&&!recordingQuitShortcut&&!recordingScreenShortcut,[settings.quitShortcut,settings.screenShortcut,restoreShortcutRef.current],{lock:deck.toggle,previous:deck.previous,next:deck.next,api:switchApi});
   const codeOverlayRef=useRef<OverlayState|null>(null);
-  codeOverlayRef.current=workspaceMode==="assist"&&answerView==="screen"?{
-    question:"屏幕代码题",hint:screen.answer||screen.error||(screen.phase==="capturing"?"正在截屏识题…":"展示题目后按 "+settings.screenShortcut),
-    status:screen.error?"error":screen.busy?"generating":"idle",locked:false,uncertainTerms:[],keyTerms:[],detail:"",detailLoading:false,detailAvailable:false,coding:true}:null;
+  codeOverlayRef.current=pinned?{question:pinned.question,hint:pinned.text,status:'idle',locked:true,uncertainTerms:pinned.terms,keyTerms:pinned.keyTerms,detail:pinned.detail,detailLoading:false,detailAvailable:!!pinned.detail,coding:pinned.kind==='screen'}:answerView==='screen'?{
+    question:screen.taskQuestion||'屏幕代码题',hint:screen.answer||screen.error||(screen.phase==='capturing'?'正在截屏识题…':'展示题目后按 '+settings.screenShortcut),
+    status:screen.error?'error':screen.busy?'generating':'idle',locked:false,uncertainTerms:[],keyTerms:[],detail:'',detailLoading:false,detailAvailable:false,coding:true}:null;
   const updateBlocked=screen.busy || running || practiceActive || practiceWorking || knowledgeBusy || !profileReady ||
     startingService || testingModel!==null || linkingModels || !!download || pulling || deletingModel || managingOllama ||
     status==="deciding" || status==="generating" || detailLoading;
@@ -563,20 +573,20 @@ function Main() {
     const sync = async () => {
       const previous=lastRegisteredShortcutRef.current;
       if(previous){try{await unregister(previous);}catch{/* Registration may already be gone. */}lastRegisteredShortcutRef.current="";}
-      if(cancelled || recordingQuitShortcut)return;
+      if(cancelled || recordingQuitShortcut || recordingScreenShortcut)return;
       try {
-        if(shortcut===restoreShortcutRef.current)throw new Error("该组合键已用于恢复任务栏");
-        if(shortcut===settingsRef.current.screenShortcut)throw new Error("该组合键已用于截屏解题");
+        if(shortcut===restoreShortcutRef.current)throw new Error("该按键已用于恢复任务栏");
+        if([settingsRef.current.screenShortcut,...Object.values(settingsRef.current.answerKeys)].includes(shortcut))throw new Error("该按键已用于截屏或回答显示控制");
         // A WebView reload can leave an app-owned registration behind.
         if(await isRegistered(shortcut))await unregister(shortcut);
         if(cancelled)return;
-        await register(shortcut,event=>{if(event.state==="Pressed")void quitRef.current();});
+        await register(shortcut,event=>{if(event.state==="Pressed"&&!shortcutRecordingRef.current)void quitRef.current();});
         if(cancelled){await unregister(shortcut);return;}
         lastRegisteredShortcutRef.current=shortcut;
         setQuitShortcutError("");
       } catch(cause) {
         if(cancelled)return;
-        setQuitShortcutError(`快捷键 ${shortcutLabel(shortcut)} 注册失败：${String(cause)}。请更换组合键。`);
+        setQuitShortcutError(`快捷键 ${shortcutLabel(shortcut)} 注册失败：${String(cause)}。请更换单个 F 键。`);
         setDiagnostics(current=>[...current,{time:new Date().toISOString(),event:"退出快捷键注册失败",detail:String(cause)}].slice(-80));
       }
     };
@@ -589,7 +599,7 @@ function Main() {
         }
       }).catch(()=>{});
     };
-  }, [settings.quitShortcut,recordingQuitShortcut]);
+  }, [settings.quitShortcut,recordingQuitShortcut,recordingScreenShortcut]);
   useEffect(() => {localStorage.setItem("interviewCue.diagnostics",JSON.stringify(diagnostics));}, [diagnostics]);
   useEffect(() => {visibleQuestionRef.current=question;visibleTermsRef.current=uncertainTerms;
     visibleKeyTermsRef.current=keyTerms;}, [question,uncertainTerms,keyTerms]);
@@ -602,7 +612,7 @@ function Main() {
   useEffect(() => {
     const state: OverlayState = {question, hint, status, locked:false, speaking:micSpeaking, uncertainTerms, keyTerms, detail, detailLoading, detailAvailable:answerSource!=="guide"&&(knowledgeAnswerRef.current?!!detail:answerSource!=="saved")};
     void emit("mvp_ui_state", codeOverlayRef.current || state);
-  }, [question, hint, status, micSpeaking, uncertainTerms, keyTerms, detail, detailLoading, answerSource,answerView,screen.answer,screen.phase,screen.error,workspaceMode]);
+  }, [question, hint, status, micSpeaking, uncertainTerms, keyTerms, detail, detailLoading, answerSource,answerView,screen.answer,screen.phase,screen.error,workspaceMode,pinned]);
 
   const refreshDevices = useCallback(async () => {
     try { setDevices(JSON.parse(await invoke<string>("list_audio_devices"))); }
@@ -639,9 +649,10 @@ function Main() {
     setDiagnostics(current=>[...current,{time:new Date().toISOString(),event,detail}].slice(-80));
   }, []);
   useEffect(() => {
+    if(!profileReady)return;
     let active=true;
     const restore = (event: {state:string})=>{
-      if(event.state!=="Pressed")return;
+      if(event.state!=="Pressed"||shortcutRecordingRef.current)return;
       void invoke<PrivacyDisplayState>("set_taskbar_hidden",{enabled:false}).then(state=>{
         setPrivacy(state);logDiagnostic("恢复普通窗口");
         const window=getCurrentWebviewWindow();
@@ -658,9 +669,9 @@ function Main() {
       } catch(cause){if(active)setPrivacyError(`读取隐私显示状态失败：${String(cause)}`);}
       if(!active)return;
       const errors:string[]=[];
-      for(const shortcut of ["Control+Shift+Backquote","Control+Alt+Shift+F12"]){
+      for(const shortcut of new Set(["F10","F11",...FUNCTION_KEYS])){
         try {
-          if(shortcut===settingsRef.current.quitShortcut||shortcut===settingsRef.current.screenShortcut)continue;
+          if([settingsRef.current.quitShortcut,settingsRef.current.screenShortcut,...Object.values(settingsRef.current.answerKeys)].includes(shortcut))continue;
           if(await isRegistered(shortcut))await unregister(shortcut);
           await register(shortcut,restore);
           if(!active){await unregister(shortcut);return;}
@@ -693,7 +704,7 @@ function Main() {
       catch { /* The launcher remains visible on startup. */ }
     })();
     return()=>{active=false;restoreShortcutRef.current="";if(registered)void unregister(registered);};
-  },[logDiagnostic]);
+  },[logDiagnostic,profileReady]);
   const changePrivacy = async (capture:boolean,taskbar:boolean) => {
     if(taskbar && !restoreReady){setPrivacyError("恢复窗口快捷键未就绪，不能隐藏任务栏入口。");return;}
     setPrivacyBusy(true);setPrivacyError("");
@@ -970,24 +981,30 @@ function Main() {
     setHint(value);
   }, []);
 
-  const markVisible = useCallback((requestId:string,startedAt:number,asrAt:number|null) => {
+  const markVisible = useCallback((requestId:string,startedAt:number,asrAt:number|null,shownQuestion=questionRef.current) => {
     if (visibleAnswerRequestRef.current === requestId) return;
     visibleAnswerRequestRef.current = requestId;
     const elapsed=Math.round(performance.now()-startedAt);
     setVisibleMs(elapsed);
-    liveHistory.record("visibility",questionRef.current,{requestId,timeToVisibleMs:elapsed,
+    liveHistory.record("visibility",shownQuestion,{requestId,timeToVisibleMs:elapsed,
       transcriptToVisibleMs:asrAt===null?null:Math.round(performance.now()-asrAt)});
     logDiagnostic("首条可见提示",asrAt === null ? `${elapsed} ms · 手动修正` :
       `${elapsed} ms · 转录更新后 ${Math.round(performance.now()-asrAt)} ms`);
   }, [logDiagnostic]);
   const showAnswerSnapshot = useCallback((display:NonNullable<typeof answerDisplayRef.current>, value:string) => {
     if (!value.trim() || display.lastShown === value) return;
-    display.lastShown=value;
+    display.lastShown=value;setVoicePageId(display.requestId);
     setQuestion(display.question);setUncertainTerms(display.terms);setKeyTerms(display.keyTerms);
     setAnswerSource(display.source);savedIntroductionRef.current=display.source==="saved";
     publishHint(value);
-    markVisible(display.requestId,display.startedAt,display.asrAt);
-  }, [publishHint,markVisible]);
+
+  }, [publishHint]);
+  const shownAuditRef=useRef('');
+  useEffect(()=>{if(!shownPage.id||!shownPage.text.trim()||shownPage.source==='guide')return;const key=shownPage.id+':'+(pinned?'fixed':'live');if(shownAuditRef.current===key)return;const resumed=shownAuditRef.current.endsWith(':fixed');shownAuditRef.current=key;
+    if(pinned)liveHistory.record('visibility',pinned.question,{requestId:pinned.id,presentationOnly:true,complete:pinned.complete,displayText:pinned.text,coding:pinned.kind==='screen'});
+    else if(resumed&&visibleAnswerRequestRef.current===shownPage.id)liveHistory.record('visibility',shownPage.question,{requestId:shownPage.id,displayResumed:true});
+    else markVisible(shownPage.id,shownPage.startedAt,shownPage.asrAt,shownPage.question);
+  },[shownPage.id,shownPage.text,!!pinned,markVisible]);
   const cancelAnswer = useCallback(() => {
     for(const branch of answerRaceRef.current?.branches || []) {
       if(!branch.done && branch.text)liveHistory.record("answer",branch.text,{question:answerDisplayRef.current?.question||questionRef.current,source:branch.source,complete:false,cancelled:true},branch.id);
@@ -1032,9 +1049,10 @@ function Main() {
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
-    const parallel=settings.parallelAnswer && settings.answer.api!=="ollama";
-    const configs=parallel ? [settings.parallelLocal,settings.answer] : [settings.answer];
-    const requestId=crypto.randomUUID();answerRequestRef.current=requestId;
+    const selectedModels=runtimeModels(settings,preferBackupRef.current);
+    const parallel=settings.parallelAnswer && selectedModels.answer.api!=="ollama";
+    const configs=parallel ? [endpoint(settings.parallelLocal,"answer"),selectedModels.answer] : [selectedModels.answer];
+    const requestId=crypto.randomUUID();answerRequestRef.current=requestId;setVoicePageId(requestId);
     liveHistory.record("question",nextQuestion,{focus,keyTerms,uncertainTerms:terms,transition},requestId);
     // Accepted tasks advance even while evidence is loading. A later transcript
     // must not resolve against an older shown answer.
@@ -1056,13 +1074,13 @@ function Main() {
     publishHint("回答思路：先直接回应当前问题，再说明依据和关键步骤。涉及个人经历时，按项目目标、本人工作、技术方法和结果组织；只使用已确认的事实，尚不清楚的细节明确留待补充。");
     // Prepare transport concurrently with disk retrieval, without sending a
     // speculative model request or using incomplete project evidence.
-    const transportReady=Promise.allSettled(configs.map(config=>invoke("mvp_prepare_model_transport",{endpoint:endpoint(config,"answer")})));
+    const transportReady=Promise.allSettled(configs.map(config=>invoke("mvp_prepare_model_transport",{endpoint:config})));
     let knowledgeContext:KnowledgeContext|undefined;
     const stillCurrent=()=>answerRequestRef.current===requestId&&!softwareUpdatingRef.current;
     {
       setStatus("generating");
       try{
-        const result=await knowledgeForQuestion(nextQuestion,await liveHistory.endpoint(endpoint(settings.answer,"answer"),"题库匹配",stillCurrent),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
+        const result=await knowledgeForQuestion(nextQuestion,await liveHistory.endpoint(selectedModels.answer,"题库匹配",stillCurrent),stillCurrent,dialogueContext(segmentsRef.current,[partialRef.current,micPartialRef.current],[],settings.mode!=="live"));
         if(!stillCurrent())return;
         if(result.note){logDiagnostic("资料增强降级",result.note);liveHistory.record("retrieval",result.note,{query:nextQuestion,continued:true});}
         if(result.exact){
@@ -1102,9 +1120,9 @@ function Main() {
         }
         if(answerRaceRef.current!==race)return;
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
-        await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(endpoint(config,"answer"),"回答生成",()=>answerRaceRef.current===race),requestId:id,
+        await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(config,"回答生成",()=>answerRaceRef.current===race),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
-          taskAttachment,backupEndpoint:config.api!=="ollama"?backupEndpoint(settings.backup):null,fallbackWaitSeconds:settings.backup.wait,
+          taskAttachment,backupEndpoint:config.api!=="ollama"?selectedModels.backup:null,fallbackWaitSeconds:settings.backup.wait,
           knowledgeContext,
           practiceContext:{...practiceBackground({scope:"comprehensive",difficulty:"medium",role:settings.targetRole,
             topics:settings.focusTopics,domain:settings.domain,local:config.api==="ollama",resume:resumeRef.current,analysis:resumeAnalysisRef.current}),consentToSendResume:true},
@@ -1199,15 +1217,16 @@ function Main() {
     const started = performance.now();
     try {
       const turns=taskWindow(segmentsRef.current,[partialRef.current,micPartialRef.current],pending.turns,settingsRef.current.mode);
+      const selectedModels=runtimeModels(settingsRef.current,preferBackupRef.current);
       const decision = await invoke<Decision>("mvp_decide", {
-        endpoint:await liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别",()=>runningRef.current&&epoch===sessionEpochRef.current),
-        backupEndpoint:backupEndpoint(settingsRef.current.backup),fallbackWaitSeconds:settingsRef.current.backup.wait,
+        endpoint:await liveHistory.endpoint(selectedModels.decision,"语义判别",()=>runningRef.current&&epoch===sessionEpochRef.current),
+        backupEndpoint:selectedModels.decisionBackup,fallbackWaitSeconds:settingsRef.current.backup.wait,
         input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,taskAttachment:recognitionAttachment(taskAttachmentRef.current),
           previousEvidence:acceptedEvidenceRef.current.question===questionRef.current?acceptedEvidenceRef.current.evidence:[],
           pendingEvidence:pendingEvidenceRef.current,
           projectKnowledge:knowledgeEnabledRef.current,
           topicBackground:topicBackground(settingsRef.current,resumeRef.current,resumeAnalysisRef.current,
-            settingsRef.current.decision.api==="ollama") },
+            selectedModels.decision.api==="ollama"&&!selectedModels.decisionBackup) },
       });
       const taskSource=decisionEvidenceSource(pending,(decision.evidence||[]).map(e=>e.turn_id));
       const elapsed=Math.round(performance.now()-started);
@@ -1340,7 +1359,7 @@ function Main() {
       stops.push(await listen<{requestId:string;error?:string}>("mvp_answer_done", event => {
         finishAnswer(event.payload.requestId,event.payload.error);
       }));
-      stops.push(await listen("mvp_detail_request", () => {void loadDetail();}));
+      stops.push(await listen("mvp_detail_request", () => {if(!deck.pinnedRef.current)void loadDetail();}));
       stops.push(await listen<{engine:string;model_id:string;percent:number;status:string;error?:string}>("model_download_progress", event => {
         const item = event.payload;
         const task=downloadTaskRef.current;
@@ -1396,13 +1415,13 @@ function Main() {
     setError("");
     if (settings.sttMode === "local" && !chosenModel?.is_downloaded) {setShowSettings(true);setError("请先下载所选语音模型");return;}
     if (settings.sttMode === "api" && !savedKeys[settings.sttApiProvider]) {setShowSettings(true);setError("请先保存语音识别 API 密钥");return;}
-    if (!settings.decision.model.trim() || !settings.answer.model.trim()) {setShowSettings(true);setError("请先填写判别和回答模型 ID");return;}
+    if (!runtimeModels(settings,preferBackupRef.current).decision.model.trim() || !runtimeModels(settings,preferBackupRef.current).answer.model.trim()) {setShowSettings(true);setError("请先填写判别和回答模型 ID");return;}
     for (const stage of ["decision","answer"] as const) {
-      if (settings[stage].api === "deepseek" && !savedKeys[credentialSlot(settings[stage],settings.sharedModelConnection ? "answer" : stage)]) {
+      if (!runtimeModels(settings,preferBackupRef.current).usingBackup && settings[stage].api === "deepseek" && !savedKeys[credentialSlot(settings[stage],settings.sharedModelConnection ? "answer" : stage)]) {
         setShowSettings(true);setError(`请先保存${stage === "decision" ? "判别" : "回答"}环节的 DeepSeek API 密钥`);return;
       }
     }
-    if ((settings.decision.api === "ollama" && !(settings.sharedModelConnection ? answerReady : decisionReady)) || (settings.answer.api === "ollama" && !answerReady)) {
+    if (!runtimeModels(settings,preferBackupRef.current).usingBackup && ((settings.decision.api === "ollama" && !(settings.sharedModelConnection ? answerReady : decisionReady)) || (settings.answer.api === "ollama" && !answerReady))) {
       try {
         await invoke("start_local_service",{service:"ollama"});
         await Promise.all([refreshModels("decision"),refreshModels("answer")]);
@@ -1719,8 +1738,9 @@ function Main() {
         <div className="panel-footer"><Radio size={14}/> {running?"转录会持续更新，问题是否已足够明确由模型判断":"开始后自动接收音频与转录"}</div>
       </section>
       <section className="answer-panel" style={panelLayout.panelStyle("answer")}><div className="panel-header"><div><span className="panel-kicker">要点提示</span><h2>回答提示</h2></div><span className="answer-spark"><Sparkles size={17}/></span></div>
-        <div className="screen-tabs" role="tablist" aria-label="回答方式"><button role="tab" aria-selected={answerView==="voice"} onClick={()=>setAnswerView("voice")}>口述问答</button><button role="tab" aria-selected={answerView==="screen"} onClick={()=>setAnswerView("screen")}>截屏解题 · {settings.screenShortcut}</button></div>
-        {answerView==="screen"?<ScreenCodePanel solver={screen} language={settings.screenCodeLanguage} onLanguage={value=>update({screenCodeLanguage:value})} shortcut={settings.screenShortcut}/>:<>
+        <AnswerControls deck={deck} keys={settings.answerKeys} onApi={switchApi} apiLabel={(runtime.usingBackup?'备用优先：':'主服务优先：')+runtime.answer.model} notice={apiSwitchNotice}/>
+        <div className="screen-tabs" role="tablist" aria-label="回答方式"><button role="tab" aria-selected={shownPage.kind==='voice'} onClick={()=>{deck.resume();setAnswerView('voice');}}>口述问答</button><button role="tab" aria-selected={shownPage.kind==='screen'} onClick={()=>{deck.resume();setAnswerView('screen');}}>截屏解题 · {settings.screenShortcut}</button></div>
+        {pinned?<><div className="answer-content frozen-answer" key={pinned.id}><div className="answer-label">固定显示的问题</div><div className="question-box active"><MathText text={pinned.question}/></div><div className="answer-label answer-label-space">{pinned.complete?'已完成的答案':'锁定时的答案内容'}</div><div className="answer-card"><div className="answer-text"><AnswerText text={pinned.text}/></div></div>{pinned.detail&&<div className="detail-card"><MathText text={pinned.detail}/></div>}</div><div className="answer-footer">仅固定当前显示 · 转录、识别和回答仍在后台继续</div></>:answerView==="screen"?<ScreenCodePanel solver={screen} language={settings.screenCodeLanguage} onLanguage={value=>update({screenCodeLanguage:value})} shortcut={settings.screenShortcut}/>:<>
         <div className="answer-content"><div className="question-heading"><div className="answer-label">模型理解的问题</div></div>
           {editingQuestion ? <div className="question-editor"><textarea aria-label="修正模型理解的问题" autoFocus
               value={questionDraft} maxLength={12000} rows={3} placeholder="输入要测试或修正的问题，例如：请写出注意力计算公式" onChange={event=>setQuestionDraft(event.target.value)}
@@ -1971,17 +1991,18 @@ function Main() {
             {!recordingQuitShortcut ? <button onClick={()=>{setQuitShortcutDraft("");setRecordingQuitShortcut(true);}}>
               更改快捷键</button> : <>
               <button onClick={()=>{
-                if(quitShortcutDraft===settings.screenShortcut){setQuitShortcutError("该快捷键已用于截屏解题。");return;}
-                if(quitShortcutDraft===restoreShortcutRef.current){setQuitShortcutError("该组合键已用于恢复任务栏，请选择其他组合键。");return;}
+                if([settings.screenShortcut,...Object.values(settings.answerKeys)].includes(quitShortcutDraft)){setQuitShortcutError("该按键已用于截屏或回答显示控制。");return;}
+                if(quitShortcutDraft===restoreShortcutRef.current){setQuitShortcutError("该按键已用于恢复任务栏，请选择其他 F 键。");return;}
                 setSettings(current=>({...current,quitShortcut:quitShortcutDraft}));setRecordingQuitShortcut(false);
               }}
                 disabled={!quitShortcutDraft}>保存快捷键</button>
               <button onClick={()=>{setRecordingQuitShortcut(false);setQuitShortcutDraft("");}}>取消</button>
             </>}
           </div>
-          <p className="setting-help">默认 Ctrl + `。录入时同时按 Ctrl、Alt 或 Shift 与字母、数字、F1–F12 或 ` 键；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
+          <p className="setting-help">默认 F12。录入时直接按单个 F1–F12；Esc 取消。快捷键在其他窗口中也生效，按下后立即退出。</p>
           {quitShortcutError && <div className="error-box" role="alert">{quitShortcutError}</div>}
-          <ScreenShortcutEditor value={settings.screenShortcut} forbidden={[settings.quitShortcut,restoreShortcutRef.current]} onSave={value=>update({screenShortcut:value})} onRecording={setRecordingScreenShortcut}/>
+          <AnswerKeySettings value={settings.answerKeys} forbidden={[settings.quitShortcut,settings.screenShortcut,restoreShortcutRef.current]} onChange={answerKeys=>update({answerKeys})} error={answerKeyError}/>
+          <ScreenShortcutEditor value={settings.screenShortcut} forbidden={[settings.quitShortcut,restoreShortcutRef.current,...Object.values(settings.answerKeys)]} onSave={value=>update({screenShortcut:value})} onRecording={setRecordingScreenShortcut}/>
           {screen.shortcutError&&<p className="error-box" role="alert">{screen.shortcutError}</p>}
         </div>}
         {settingsTab === "updates" && <SoftwareUpdate version={version} blocked={updateBlocked} updater={updater}/>}

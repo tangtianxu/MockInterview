@@ -57,7 +57,7 @@ test('parallel streams, Enter/IME, follow-up context, cancellation and cursors i
   const third=await submit('比较 PPO 与 SAC',6);const fourth=await submit('什么是注意力',8);
   await page.evaluate(id=>window.send(id,'这是新问题的正确答案。',undefined,true),fourth.find(x=>x.endpoint.api==='openai').requestId);
   await page.evaluate(id=>window.send(id,'旧问题迟到的错误覆盖。',undefined,true),third[0].requestId);
-  assert.match(await page.locator('.answer-text').textContent(),/新问题/);assert.doesNotMatch(await page.locator('.answer-text').textContent(),/旧问题/);
+  await page.locator('.answer-text').filter({hasText:'新问题'}).waitFor();assert.match(await page.locator('.answer-text').textContent(),/新问题/);assert.doesNotMatch(await page.locator('.answer-text').textContent(),/旧问题/);
   const cancelled=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_cancel_answer').map(x=>x.args.requestId));assert.ok(third.every(x=>cancelled.includes(x.requestId)));
   assert.equal(await page.getByRole('button',{name:'开始聆听',exact:true}).evaluate(el=>getComputedStyle(el).cursor),'default');
   assert.equal(await page.locator('.resize-northwest').evaluate(el=>getComputedStyle(el).cursor),'nwse-resize');

@@ -27,7 +27,7 @@ mockIPC(async(command,args)=>{
    if(args.enabled&&scenario==='style-failure')throw new Error('刷新窗口样式失败');
    state.taskbar_hidden=args.enabled;return {...state};
  }
- if(command==='plugin:global-shortcut|register'&&args.shortcuts?.some(value=>value.includes('Shift'))){
+ if(command==='plugin:global-shortcut|register'&&args.shortcuts?.some(value=>value!=='F12')){
    attempts++;if(scenario==='shortcut-failure'||(scenario==='fallback'&&attempts===1))throw new Error('Hotkey already registered');
  }
  if(command==='has_api_key'||command==='get_saved_taskbar_preference'||command.includes('is_registered'))return false;
@@ -65,8 +65,8 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
       }
       const calls=await page.evaluate(()=>window.calls);
       const hide=calls.findIndex(item=>item.command==='set_taskbar_hidden'&&item.args.enabled);
-      const registrations=calls.filter(item=>item.command==='plugin:global-shortcut|register'&&item.args.shortcuts?.some(value=>value.includes('Shift')));
-      assert.equal(registrations.length,scenario==='fallback'||scenario==='shortcut-failure'?2:1);
+      const registrations=calls.filter(item=>item.command==='plugin:global-shortcut|register'&&item.args.shortcuts?.some(value=>value!=='F12'));
+      assert.equal(registrations.length,scenario==='shortcut-failure'?6:scenario==='fallback'?2:1);
       if(scenario==='shortcut-failure')assert.equal(hide,-1);
       else assert.ok(hide>calls.findIndex(item=>item===registrations.at(-1)));
       assert.equal(calls.some(item=>item.command==='get_saved_taskbar_preference'),false);

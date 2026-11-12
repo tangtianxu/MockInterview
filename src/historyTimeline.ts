@@ -13,6 +13,6 @@ export function timelineAt(entries:HistoryEntry[],startMs:number,seconds:number)
  const generated=latest('answer');
  // Visibility is recorded independently. Never describe a completed historical
  // answer as having been fully visible at its first token's timestamp.
- const answer=visibility?entries.filter(e=>e.kind==='answer'&&((e.data.question||'')===visibility.text||e.id===visibility.data.requestId||e.id.startsWith(visibility.data.requestId+'-'))).slice(-1)[0]||null:generated;
+ const answer=visibility&&typeof visibility.data.displayText==='string'?{...visibility,kind:'answer',text:visibility.data.displayText}:visibility?entries.filter(e=>e.kind==='answer'&&((e.data.question||'')===visibility.text||e.id===visibility.data.requestId||e.id.startsWith(visibility.data.requestId+'-'))).slice(-1)[0]||null:generated;
  return {transcript:latest('transcript'),question:latest('question'),answer,visibility};
 }

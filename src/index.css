@@ -278,3 +278,14 @@ html,body,#root{background:transparent!important}
   .hero-card{padding:16px 14px}
   .hero-card h1{font-size:20px;line-height:1.4}
 }
+
+/* Checkboxes are inline controls, not full-width text fields. */
+.settings-fields .setting-group label.check-row{display:flex;align-items:center;gap:10px;line-height:1.6;cursor:default}
+.settings-fields .setting-group label.check-row input[type=checkbox]{display:inline-block;width:18px;height:18px;flex:0 0 18px;margin:0;padding:0;accent-color:#45cbaa}
+.settings-fields .setting-group label.check-row span{min-width:0}
+.answer-controls{flex:none;padding:10px 18px;border-bottom:1px solid #82a99b44}
+.answer-controls .key-actions{display:flex;flex-wrap:wrap;gap:6px;margin:0}
+.answer-controls button{font-size:11px;padding:7px 9px;border-radius:8px}
+.answer-controls p{font-size:11px;line-height:1.5;margin:6px 0 0;color:#71998f;overflow-wrap:anywhere}
+.answer-controls button[aria-pressed=true]{border-color:#43c5a5;background:#20645a;color:#eefff6}
+.frozen-answer .question-box{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto}

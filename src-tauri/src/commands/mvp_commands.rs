@@ -200,7 +200,7 @@ pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionI
             let budget=if name=="submit_task"{1800}else{1000};
             if backup_used.load(std::sync::atomic::Ordering::Relaxed){if let Some(mut next)=backup.clone(){next.history_session_id=endpoint.history_session_id.clone();next.usage_stage=Some("备用语义核验".into());return contract_call(&app,&next,name,system,schema,&user,budget).await.map(|v|v.0);}}
             let call=contract_call(&app,&endpoint,name,system,schema.clone(),&user,budget);
-            let result=if backup.is_some(){tokio::time::timeout(Duration::from_secs(fallback_wait_seconds.unwrap_or(12).clamp(5,60)),call).await.unwrap_or_else(|_|Err("主服务语义判别等待超时".into()))}else{call.await};
+            let result=if backup.is_some(){tokio::time::timeout(Duration::from_secs(fallback_wait_seconds.unwrap_or(3).clamp(2,60)),call).await.unwrap_or_else(|_|Err("主服务语义判别等待超时".into()))}else{call.await};
             match (result,backup){
                 (Err(reason),Some(mut next))=>{backup_used.store(true,std::sync::atomic::Ordering::Relaxed);next.history_session_id=endpoint.history_session_id.clone();next.usage_stage=Some("备用语义判别".into());
                     super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","语义判别切换备用服务",serde_json::json!({"reason":reason,"model":next.model,"baseUrl":next.base_url}));
@@ -297,12 +297,12 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     };
     let flag = Arc::new(AnswerCancellation::default());
     flags().lock().map_err(|e| e.to_string())?.insert(request_id.clone(), flag.clone());
-    let wait=backup_endpoint.as_ref().map(|_|fallback_wait_seconds.unwrap_or(12).clamp(5,60));
+    let wait=backup_endpoint.as_ref().map(|_|fallback_wait_seconds.unwrap_or(3).clamp(2,60));
     let backup=backup_endpoint.map(|mut b|{b.history_session_id=endpoint.history_session_id.clone();b.usage_stage=Some("备用回答生成".into());b});
     let result=super::model_failover::once(backup.is_some(),||flag.is_cancelled(),|is_backup|{
         let config=if is_backup{backup.as_ref().unwrap()}else{&endpoint};
         let body=make_body(config);let flag=flag.clone();let app=app.clone();let request_id=request_id.clone();let config=config.clone();
-        async move{answer_attempt(&app,&config,&request_id,body,&flag,if is_backup{Some(wait.unwrap_or(12).max(20))}else{wait},is_backup).await}
+        async move{answer_attempt(&app,&config,&request_id,body,&flag,if is_backup{Some(wait.unwrap_or(3).max(5))}else{wait},is_backup).await}
     },|reason|{
         super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","回答切换备用服务",serde_json::json!({"reason":reason,"model":backup.as_ref().map(|b|&b.model),"baseUrl":backup.as_ref().map(|b|&b.base_url),"requestId":request_id}));
         let _=app.emit("mvp_answer_phase",serde_json::json!({"requestId":request_id,"phase":"主服务未完成，正在切换备用模型","elapsedMs":0}));
@@ -320,7 +320,7 @@ async fn answer_attempt(app:&AppHandle,endpoint:&ModelEndpoint,request_id:&str,b
     let response=tokio::select!{biased;_=flag.wait()=>return Ok(()),response=tokio::time::timeout_at(first_deadline,request.send())=>response.map_err(|_|"等待主服务响应超时")?.map_err(|e|e.to_string())?}.error_for_status().map_err(|e|e.to_string())?;
     let _=app.emit("mvp_answer_phase",serde_json::json!({"requestId":request_id,"phase":"响应就绪","elapsedMs":started.elapsed().as_millis()}));
     let mut stream=response.bytes_stream();let mut first_token=true;
-    let (result,mut decoder)=super::answer_pump::pump(&mut stream,endpoint.api=="ollama",flag,first_deadline,Duration::from_secs(if wait.is_some(){20}else{180}),|token|{
+    let (result,mut decoder)=super::answer_pump::pump(&mut stream,endpoint.api=="ollama",flag,first_deadline,Duration::from_secs(if wait.is_some(){wait.unwrap_or(3).max(5)}else{180}),|token|{
         if first_token&&replace{let _=app.emit("mvp_answer_reset",serde_json::json!({"requestId":request_id,"model":endpoint.model}));}first_token=false;
         let _=app.emit("mvp_answer_token",serde_json::json!({"requestId":request_id,"token":token}));
     }).await;

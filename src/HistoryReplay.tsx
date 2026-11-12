@@ -28,7 +28,7 @@ export function HistoryReplay({record,active,revision}:{record:HistoryRecord;act
    {!info.complete&&<p className="setting-help">录音未完整结束，仅能回放已保存部分。</p>}{info.error&&<p className="error-box">{info.error}</p>}
   </>:<p className="setting-help">这场会话没有录音。此前版本未保存音频，无法补回。开启“设置 → 音频 → 保存本场录音”后，从下一次聆听开始保存。</p>}
   {error&&<p className="error-box" role="alert">{error}</p>}
-  {info&&!active&&<div className="replay-current" aria-live="off"><p><small>此刻的转录</small>{state.transcript?.text||'尚无转录'}</p><p><small>已识别的问题</small>{state.question?.text||'尚未识别到问题'}</p><div><small>{state.visibility?'已显示的提示（保存的最终版本）':'保存的模型回答（没有对应的提示显示记录）'}</small>{state.answer?<AnswerText text={state.answer.text}/>:<p>此刻尚无回答</p>}</div></div>}
+  {info&&!active&&<div className="replay-current" aria-live="off"><p><small>此刻的转录</small>{state.transcript?.text||'尚无转录'}</p><p><small>已识别的问题</small>{state.question?.text||'尚未识别到问题'}</p><div><small>{state.visibility?.data.presentationOnly?'固定显示时的提示内容':state.visibility?'已显示的提示（保存的最终版本）':'保存的模型回答（没有对应的提示显示记录）'}</small>{state.answer?<AnswerText text={state.answer.text}/>:<p>此刻尚无回答</p>}</div></div>}
   <details><summary>按时间浏览转录、问题与提示（{marks.length} 条）</summary><div className="replay-marks">{marks.map(({entry,time})=><button key={entry.id} disabled={!info||active} onClick={()=>seek(time)}><time>{clock(time)}</time><span>{entry.kind==='transcript'?(entry.data.speaker==='User'?'我的回答':'提问音频'):entry.kind==='visibility'?'提示已显示':'问题'}：{entry.text}</span></button>)}</div></details>
  </section>;
 }

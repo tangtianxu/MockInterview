@@ -13,3 +13,7 @@ test('a fallback replaces an incomplete stream instead of appending two code ans
 test('screen attachment is bounded for recognition; full source is unchanged for answering',()=>{
  const value={id:'screen',kind:'screen_code',text:'x'.repeat(24000),answer:'y'.repeat(30000),language:'Python 3',complete:true};const copy=recognitionAttachment(value);assert.ok(copy.text.length<12100);assert.ok(copy.answer.length<8100);assert.equal(value.text.length,24000);assert.equal(copy.kind,'screen_code');assert.equal(recognitionAttachment(null),null);
 });
+
+test('a pinned display retains its exact text even after the model finishes a different version',()=>{
+ const start=Date.parse('2026-11-12T00:00:00Z');const entries=[{id:'a',kind:'answer',at:new Date(start+3000).toISOString(),text:'后来生成的完整答案',data:{question:'题目'}},{id:'fixed',kind:'visibility',at:new Date(start+1000).toISOString(),text:'题目',data:{requestId:'a',presentationOnly:true,displayText:'用户锁定时的半截内容'}}];assert.equal(timelineAt(entries,start,4).answer.text,'用户锁定时的半截内容');
+});

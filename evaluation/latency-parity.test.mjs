@@ -7,9 +7,9 @@ import {chromium} from 'playwright-core';
 import {AnswerRace} from '../src/answerRace.ts';
 import {readablePreview} from '../src/answerDisplay.ts';
 
-const baselineFile=name=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.36:src/${name}`],{encoding:'utf8'});
+const baselineFile=name=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.37:src/${name}`],{encoding:'utf8'});
 test('generation guidance, output budgets and normal request arguments remain intact',async()=>{
- const oldFile=path=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.36:${path}`],{encoding:'utf8'}).replaceAll('\r\n','\n');
+ const oldFile=path=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.37:${path}`],{encoding:'utf8'}).replaceAll('\r\n','\n');
  const path='src-tauri/src/commands/mvp_commands.rs',before=oldFile(path),after=(await readFile(path,'utf8')).replaceAll('\r\n','\n');
  const answer=source=>source.slice(source.indexOf('pub async fn mvp_answer('),source.indexOf('pub async fn mvp_explain('));
  for(const marker of ['let token_limit = 6144','temperature\":0.2','CODE_ANSWER_SYSTEM','technical-answer.txt'])assert.ok(answer(after).includes(marker)&&answer(before).includes(marker),marker);
@@ -98,7 +98,7 @@ test('real UI keeps baseline answer arguments and waits for evidence while trans
    }
    assert.deepEqual(errors,[]);await page.close();
   }
-  assert.deepEqual(payloads[1],payloads[0],'all generation arguments except request/session IDs must match 1.0.36');
+  assert.deepEqual(payloads[1],payloads[0],'all generation arguments except request/session IDs must match 1.0.37');
   await writeFile('outputs/latency-request-parity.json',JSON.stringify({cases:payloads[0].length,allArgumentsIdentical:true,evidenceBarrierPassed:true,staleRequestGuardPassed:true},null,2));
  }finally{await browser?.close();server.kill();await unlink(fixture).catch(()=>{});await unlink(baseline).catch(()=>{});}
 });

@@ -20,12 +20,12 @@ type SolverOptions={enabled:boolean;shortcutEnabled:boolean;blocked:()=>boolean;
 export function useScreenCode(options:SolverOptions){
  const opts=useRef(options);opts.current=options;
  const [draft,setDraft]=useState("");const [answer,setAnswer]=useState("");
+ const [taskId,setTaskId]=useState("");const [taskQuestion,setTaskQuestion]=useState("");const [complete,setComplete]=useState(false);const startedAt=useRef(0);
  const [capture,setCapture]=useState<CapturedScreen|null>(null);
  const [phase,setPhase]=useState<"idle"|"capturing"|"generating">("idle");
  const [error,setError]=useState("");const [shortcutError,setShortcutError]=useState("");
  const epoch=useRef(0);const request=useRef("");const capturePending=useRef(false);
  const text=useRef("");const mounted=useRef(true);
- const displayTask=useRef<{id:string;question:string;started:number;recorded:boolean;history:ReturnType<HistoryRecorder['scope']>}|null>(null);
  const queue=useRef<Promise<void>>(Promise.resolve());const registered=useRef("");
  const cancel=useCallback(()=>{
   epoch.current++;const id=request.current;request.current="";
@@ -37,13 +37,13 @@ export function useScreenCode(options:SolverOptions){
   if(!problem.trim()){setError("请先截图，或在识别文字中输入完整题目。");setPhase("idle");return;}
   if(problem.length>24000){setError("请将文字缩减到24000字以内，保留当前题目、约束与样例。");setPhase("idle");return;}
   if(turn!==epoch.current)return;
-  const id=crypto.randomUUID();request.current=id;text.current="";setAnswer("");setError("");setPhase("generating");
+  const id=crypto.randomUUID();setTaskId(id);setTaskQuestion(problem);setComplete(false);startedAt.current=performance.now();request.current=id;text.current="";setAnswer("");setError("");setPhase("generating");
   const attachment:TaskAttachment={id,kind:'screen_code',text:problem,language,answer:'',complete:false};
   opts.current.onContext?.(attachment);
   const stops:UnlistenFn[]=[];let failure="";let cancelled=false;let completed=false;let received="";
   const current=()=>mounted.current&&turn===epoch.current&&request.current===id;
   history.ensure("manual","截屏代码题");
-  const saved=history.scope();displayTask.current={id,question:problem,started:performance.now(),recorded:false,history:saved};
+  const saved=history.scope();
   saved.record("question",problem,{coding:true,language},`${id}-question`);
   try{
    stops.push(await listen<{requestId:string;token:string}>("mvp_answer_token",event=>{
@@ -62,7 +62,7 @@ export function useScreenCode(options:SolverOptions){
   }catch(cause){failure=String(cause);if(current())setError(failure);}
   finally{
    stops.forEach(stop=>stop());cancelled=cancelled||!current();
-   if(current())opts.current.onContext?.({...attachment,answer:received,complete:completed&&!failure&&!cancelled});
+   if(current()){setComplete(completed&&!failure&&!cancelled);opts.current.onContext?.({...attachment,answer:received,complete:completed&&!failure&&!cancelled});}
    saved.record("answer",received,{coding:true,question:problem,language,complete:completed&&!failure&&!cancelled,error:failure||null,cancelled},`${id}-answer`);
    if(current()){request.current="";setPhase("idle");}
   }
@@ -86,7 +86,7 @@ export function useScreenCode(options:SolverOptions){
   cancel();opts.current.onOpen();void generate(draft,epoch.current);
  },[cancel,generate,draft]);
  const screenshotRef=useRef(screenshot);screenshotRef.current=screenshot;
- useEffect(()=>{const task=displayTask.current;if(!answer.trim()||!task||task.recorded)return;task.recorded=true;task.history.record('visibility',task.question,{requestId:task.id,coding:true,timeToVisibleMs:Math.round(performance.now()-task.started)},`${task.id}-visible`);},[answer]);
+
  useEffect(()=>{
   let disposed=false;const shortcut=options.shortcut;
   const sync=async()=>{
@@ -104,7 +104,7 @@ export function useScreenCode(options:SolverOptions){
  },[options.enabled,options.shortcutEnabled,options.shortcut,options.forbidden.join("|")]);
  useEffect(()=>{if(!options.enabled)cancel();},[options.enabled,cancel]);
  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;epoch.current++;const id=request.current;request.current="";if(id)void invoke("mvp_cancel_answer",{requestId:id}).catch(()=>{});};},[]);
- return {draft,setDraft,answer,capture,phase,error,shortcutError,screenshot,solve,cancel,busy:phase!=="idle"};
+ return {draft,setDraft,answer,capture,phase,error,shortcutError,screenshot,solve,cancel,taskId,taskQuestion,complete,startedAt:startedAt.current,busy:phase!=="idle"};
 }
 
 function CodeBlock({children}:{children:React.ReactNode}){
@@ -149,7 +149,7 @@ export function ScreenShortcutEditor({value,forbidden,onSave,onRecording}:{value
  return <div className="screen-shortcut-setting"><label>截屏解题快捷键（面试助手模式）<input ref={input} aria-label="截屏解题快捷键" readOnly value={recording?(draft||"请按下功能键…"):value} onKeyDown={event=>{
   if(!recording)return;event.preventDefault();event.stopPropagation();
   if(event.key==="Escape"){stop();return;}
-  if(/^F(?:[1-9]|1[0-2])$/.test(event.code)){const parts=[event.ctrlKey&&"Control",event.altKey&&"Alt",event.shiftKey&&"Shift",event.code].filter(Boolean);setDraft(parts.join("+"));setError("");}
+  if(!event.ctrlKey&&!event.altKey&&!event.shiftKey&&!event.metaKey&&/^F(?:[1-9]|1[0-2])$/.test(event.code)){setDraft(event.code);setError("");}
  }}/></label><div className="key-actions">{!recording?<button onClick={()=>{setDraft("");setError("");setRecording(true);onRecording(true);}}>更改截屏键</button>:<>
   <button disabled={!draft} onClick={()=>{if(forbidden.includes(draft)){setError("该快捷键已用于退出或恢复任务栏。");return;}onSave(draft);stop();}}>保存截屏键</button><button onClick={stop}>取消</button></>}</div>
   <p className="setting-help">默认单键 F8。可以换成 F1–F12，录入时按 Esc 取消。仅在面试助手页面注册；冲突时会提示更换。</p>{error&&<p className="error-box" role="alert">{error}</p>}</div>;

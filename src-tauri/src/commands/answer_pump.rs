@@ -45,6 +45,15 @@ mod tests {
         format!("data: {}\n\n",serde_json::json!({"choices":[{"delta":{"content":text},"finish_reason":if end.is_empty(){serde_json::Value::Null}else{serde_json::json!(end)}}]})).into_bytes()
     }
     #[tokio::test]
+    async fn explicit_server_errors_finish_immediately_even_if_the_connection_stays_open() {
+        for body in [b"data: {\"error\":{\"message\":\"server busy\"}}\n\n".to_vec(),b"{\"error\":{\"message\":\"server busy\"}}".to_vec()] {
+            let mut stream=Box::pin(stream::iter([Ok::<_,String>(body)]).chain(stream::pending()));
+            let flag=AnswerCancellation::default();
+            let result=tokio::time::timeout(Duration::from_millis(250),pump(&mut stream,false,&flag,tokio::time::Instant::now()+Duration::from_secs(12),Duration::from_secs(12),|_|panic!("error is not answer text"))).await.expect("must not wait for the no-content deadline").0;
+            assert!(result.unwrap_err().contains("错误"));
+        }
+    }
+    #[tokio::test]
     async fn empty_completed_responses_are_failures_and_full_code_is_preserved() {
         for (text, valid) in [
             ("", false),
