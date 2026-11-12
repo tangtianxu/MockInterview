@@ -88,3 +88,5 @@
   }
 }
 @media(max-width:680px){.practice-workspace.practice-hide-setup,.practice-workspace.practice-hide-feedback,.practice-workspace.practice-hide-setup.practice-hide-feedback{display:flex}}
+
+.history-detail{min-width:0;scroll-margin-top:10px}.history-replay{margin:18px 0;padding:14px;border:1px solid #53786c;border-radius:12px;min-width:0}.history-replay h4{margin:0 0 12px}.history-replay input[type=range]{width:100%;padding:0;accent-color:#36b394}.history-replay audio{display:none}.replay-current{display:grid;gap:12px;margin-top:14px}.replay-current p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}.replay-current small{display:block;opacity:.75;font-size:11px;margin-bottom:7px}.replay-marks{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto;margin-top:10px}.replay-marks button{display:flex;gap:12px;text-align:left;background:transparent;color:inherit;border:1px solid #587269;border-radius:8px;padding:10px;white-space:normal;overflow-wrap:anywhere}.replay-marks time{flex-shrink:0;font-variant-numeric:tabular-nums}.history-replay details{margin-top:14px}.history-replay .key-actions{flex-wrap:wrap}

@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tauri::{command, AppHandle, Emitter, Manager};
 use crate::state::AppState;
 use super::practice_protocol::{safe_feedback, safe_resume_analysis, parse_json_object, repeated_question, duplicate_index, PracticeContext, knowledge_prompt, SCORE_GUIDANCE};
-use super::answer_stream::{AnswerStream, AnswerCancellation, finish_error};
+use super::answer_stream::{AnswerCancellation, finish_error};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +75,7 @@ fn credential(app: &AppHandle, endpoint: &ModelEndpoint) -> Result<Option<String
     let Some(slot) = endpoint.credential_slot.as_deref() else { return Ok(None); };
     reqwest::Url::parse(&endpoint.base_url).map_err(|e| e.to_string())?;
     let scoped_url = endpoint.base_url.trim().trim_end_matches('/');
-    if slot != format!("interview_cue_decision@{scoped_url}") && slot != format!("interview_cue_answer@{scoped_url}") {
+    if slot != format!("interview_cue_decision@{scoped_url}") && slot != format!("interview_cue_answer@{scoped_url}") && slot != format!("interview_cue_fallback@{scoped_url}") {
         return Err("未知的模型凭据位置".into());
     }
     let state = app.state::<AppState>();
@@ -153,7 +153,7 @@ pub async fn mvp_test_model_endpoint(app: AppHandle, endpoint: ModelEndpoint, st
     let mut body = serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,"max_tokens":64});
     if endpoint.api == "ollama" { body["think"] = serde_json::json!(false); }
     if endpoint.api == "deepseek" { body["thinking"] = serde_json::json!({"type":"disabled"}); }
-    let value: serde_json::Value = authorized(client(30, &endpoint)?.post(url).json(&body), key.as_deref())
+    let value: serde_json::Value = authorized(client(30, &endpoint)?.post(url).json(&super::model_compat::body(&endpoint.base_url,&endpoint.model,body)), key.as_deref())
         .send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
@@ -167,7 +167,7 @@ pub(super) async fn contract_call(app:&AppHandle,endpoint:&ModelEndpoint,name:&s
     let url=endpoint_url(endpoint,"chat")?;
     let body=super::model_contract::body(&endpoint.api,&endpoint.model,name,system,user,schema,budget);
     let key=credential(app,endpoint)?;
-    let response=authorized(client(25,endpoint)?.post(url).json(&body),key.as_deref()).send().await.map_err(|e|e.to_string())?;
+    let response=authorized(client(25,endpoint)?.post(url).json(&super::model_compat::body(&endpoint.base_url,&endpoint.model,body)),key.as_deref()).send().await.map_err(|e|e.to_string())?;
     let status=response.status();
     if !status.is_success(){return Err(match status.as_u16(){
         401|403=>format!("API 密钥或服务权限未通过（HTTP {}）",status.as_u16()),
@@ -181,7 +181,7 @@ pub(super) async fn contract_call(app:&AppHandle,endpoint:&ModelEndpoint,name:&s
 }
 
 #[command]
-pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionInput)->Result<Decision,String>{
+pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionInput,backup_endpoint:Option<ModelEndpoint>,fallback_wait_seconds:Option<u64>)->Result<Decision,String>{
     let root=app.path().app_config_dir().map_err(|e|e.to_string())?.join("knowledge-library");
     // Library availability informs grounding, never whether speech is a task.
     // Metadata-only vocabulary is optional; corrupt/missing library state must
@@ -191,11 +191,23 @@ pub async fn mvp_decide(app:AppHandle,endpoint:ModelEndpoint,mut input:DecisionI
         if lib.enabled {input.term_hints=crate::knowledge_search::recognition_terms(&crate::knowledge::questions(&root).0,&lib.sources);}
         lib.enabled
     }).unwrap_or(false);
+    let backup_used=Arc::new(std::sync::atomic::AtomicBool::new(false));
     let result=super::task_harness::run(&input,|name,system,schema,user|{
         let mut endpoint=endpoint.clone();
         if name=="verify_task"{endpoint.usage_stage=Some("语义任务核验".into());}
-        let app=app.clone();
-        async move{contract_call(&app,&endpoint,name,system,schema,&user,if name=="submit_task"{1800}else{1000}).await.map(|v|v.0)}
+        let app=app.clone();let backup=backup_endpoint.clone();let backup_used=backup_used.clone();
+        async move{
+            let budget=if name=="submit_task"{1800}else{1000};
+            if backup_used.load(std::sync::atomic::Ordering::Relaxed){if let Some(mut next)=backup.clone(){next.history_session_id=endpoint.history_session_id.clone();next.usage_stage=Some("备用语义核验".into());return contract_call(&app,&next,name,system,schema,&user,budget).await.map(|v|v.0);}}
+            let call=contract_call(&app,&endpoint,name,system,schema.clone(),&user,budget);
+            let result=if backup.is_some(){tokio::time::timeout(Duration::from_secs(fallback_wait_seconds.unwrap_or(12).clamp(5,60)),call).await.unwrap_or_else(|_|Err("主服务语义判别等待超时".into()))}else{call.await};
+            match (result,backup){
+                (Err(reason),Some(mut next))=>{backup_used.store(true,std::sync::atomic::Ordering::Relaxed);next.history_session_id=endpoint.history_session_id.clone();next.usage_stage=Some("备用语义判别".into());
+                    super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","语义判别切换备用服务",serde_json::json!({"reason":reason,"model":next.model,"baseUrl":next.base_url}));
+                    contract_call(&app,&next,name,system,schema,&user,budget).await.map(|v|v.0)},
+                (result,_)=>result.map(|v|v.0)
+            }
+        }
     }).await;
     let data=serde_json::json!({"version":3,"input":input,"decision":result.as_ref().ok(),"error":result.as_ref().err()});
     super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"decision",
@@ -229,7 +241,8 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     question: String, question_context: Option<Vec<String>>, focus: Vec<String>, key_terms: Option<Vec<String>>, constraints: Vec<String>,
     uncertain_terms: Vec<String>, answer_instructions: Option<String>, practice_reference: Option<bool>,
     practice_context: Option<PracticeContext>,knowledge_context:Option<super::knowledge_commands::AnswerContext>,
-    code_question: Option<bool>) -> Result<(), String> {
+    code_question: Option<bool>,task_attachment:Option<super::task_context::TaskAttachment>,
+    backup_endpoint:Option<ModelEndpoint>,fallback_wait_seconds:Option<u64>) -> Result<(), String> {
     if question.trim().is_empty() { return Err("没有可回答的问题".into()); }
     let coding = code_question.unwrap_or(false);
     if coding && question.chars().count() > 24_000 { return Err("题目文字超过24000字，请保留当前完整题目后重试".into()); }
@@ -246,11 +259,13 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
         }
     });
     let key_terms = key_terms.unwrap_or_default();
-    let url = endpoint_url(&endpoint, "chat")?;
+    endpoint_url(&endpoint, "chat")?;
+    if let Some(attachment)=&task_attachment{attachment.validate()?;}
     if !coding && question.chars().count()>12_000 {return Err("问题超过12000字，请保留当前题干、输入输出和约束后重试".into());}
     let guidance=include_str!("../../resources/technical-answer.txt");
     let system = if coding {format!("{CODE_ANSWER_SYSTEM}\n{guidance}")} else {answer_system(guidance,answer_instructions.as_deref())};
     let user = if coding {format!("用户选定语言（题干另有指定时优先题干）：{}\n以下是待筛选的屏幕识别文字，请先提取当前题目：\n<screen_text>\n{}\n</screen_text>", constraints.join("；"), question)} else {format!("技术回答任务：{}\n必须覆盖：{}\n需解释的术语：{}\n明确条件：{}\n听写不确定术语：{}", question, focus.join("；"), key_terms.iter().take(3).cloned().collect::<Vec<_>>().join("、"), constraints.join("；"), uncertain_terms.join("、"))};
+    let user=if let Some(attachment)=&task_attachment{format!("{}\n当前最新任务：\n{user}",attachment.text())}else{user};
     let previous = question_context.unwrap_or_default().into_iter().rev().take(3)
         .map(|text| text.chars().take(600).collect::<String>()).collect::<Vec<_>>()
         .into_iter().rev().collect::<Vec<_>>().join("\n");
@@ -270,7 +285,7 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     // Chinese explanations, acronym expansions and formula source.
     let token_limit = 6144;
     let messages = serde_json::json!([{"role":"system","content":system},{"role":"user","content":user}]);
-    let body = if endpoint.api == "ollama" {
+    let make_body=|endpoint:&ModelEndpoint| if endpoint.api == "ollama" {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":true,
             "think":false,"options":{"temperature":0.2,"num_predict":token_limit}})
     } else if endpoint.api == "deepseek" {
@@ -282,64 +297,36 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     };
     let flag = Arc::new(AnswerCancellation::default());
     flags().lock().map_err(|e| e.to_string())?.insert(request_id.clone(), flag.clone());
-    let result = async {
-        let key = credential(&app, &endpoint)?;
-        let started = std::time::Instant::now();
-        let request=authorized(client(180, &endpoint)?.post(url).json(&body), key.as_deref());
-        let response = tokio::select! {
-            biased;
-            _=flag.wait()=>return Ok(()),
-            response=request.send()=>response.map_err(|e|e.to_string())?,
-        }
-            .error_for_status().map_err(|e| e.to_string())?;
-        let _ = app.emit("mvp_answer_phase", serde_json::json!({"requestId":request_id,
-            "phase":"响应就绪", "elapsedMs":started.elapsed().as_millis()}));
-        let mut stream = response.bytes_stream();
-        let mut decoder = AnswerStream::new(endpoint.api == "ollama");
-        let mut received_chars = 0;
-        loop {
-            let chunk=tokio::select! {
-                biased;
-                _=flag.wait()=>break,
-                chunk=stream.next()=>chunk,
-            };
-            let Some(chunk)=chunk else {break;};
-            for token in decoder.push(&chunk.map_err(|e| e.to_string())?) {
-                received_chars += token.chars().count();
-                let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
-            }
-            if decoder.is_finished() { break; }
-        }
-        if flag.is_cancelled() { return Ok(()); }
-        if !decoder.is_finished() {
-            for token in decoder.flush() {
-                received_chars += token.chars().count();
-                let _ = app.emit("mvp_answer_token", serde_json::json!({"requestId":request_id,"token":token}));
-            }
-        }
-        for (phase, elapsed_ms) in decoder.timings() {
-            let _ = app.emit("mvp_answer_phase", serde_json::json!({"requestId":request_id,
-                "phase":phase, "elapsedMs":elapsed_ms, "duration":true}));
-        }
-        let outcome = decoder.outcome();
-        if decoder.usage().is_some() || endpoint.api!="deepseek" {
-            save_usage(&app,&endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));
-        }else{
-            // Usage is a trailing SSE frame. Collect it without delaying the
-            // visible answer completion or issuing another model request.
-            let stats_app=app.clone();let stats_endpoint=endpoint.clone();
-            tokio::spawn(async move {
-                let _=tokio::time::timeout(Duration::from_secs(5),async{
-                    while let Some(Ok(chunk))=stream.next().await {decoder.push(&chunk);if decoder.usage().is_some(){break;}}
-                }).await;
-                save_usage(&stats_app,&stats_endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));
-            });
-        }
-        log::info!("Answer stream: budget={token_limit}, received_chars={received_chars}, outcome={:?}", outcome);
-        outcome
-    }.await;
+    let wait=backup_endpoint.as_ref().map(|_|fallback_wait_seconds.unwrap_or(12).clamp(5,60));
+    let backup=backup_endpoint.map(|mut b|{b.history_session_id=endpoint.history_session_id.clone();b.usage_stage=Some("备用回答生成".into());b});
+    let result=super::model_failover::once(backup.is_some(),||flag.is_cancelled(),|is_backup|{
+        let config=if is_backup{backup.as_ref().unwrap()}else{&endpoint};
+        let body=make_body(config);let flag=flag.clone();let app=app.clone();let request_id=request_id.clone();let config=config.clone();
+        async move{answer_attempt(&app,&config,&request_id,body,&flag,if is_backup{Some(wait.unwrap_or(12).max(20))}else{wait},is_backup).await}
+    },|reason|{
+        super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","回答切换备用服务",serde_json::json!({"reason":reason,"model":backup.as_ref().map(|b|&b.model),"baseUrl":backup.as_ref().map(|b|&b.base_url),"requestId":request_id}));
+        let _=app.emit("mvp_answer_phase",serde_json::json!({"requestId":request_id,"phase":"主服务未完成，正在切换备用模型","elapsedMs":0}));
+    }).await;
     flags().lock().map_err(|e| e.to_string())?.remove(&request_id);
     let _ = app.emit("mvp_answer_done", serde_json::json!({"requestId":request_id,"error":result.as_ref().err()}));
+    result
+}
+
+async fn answer_attempt(app:&AppHandle,endpoint:&ModelEndpoint,request_id:&str,body:serde_json::Value,
+    flag:&AnswerCancellation,wait:Option<u64>,replace:bool)->Result<(),String>{
+    let key=credential(app,endpoint)?;let url=endpoint_url(endpoint,"chat")?;
+    let started=tokio::time::Instant::now();let first_deadline=started+Duration::from_secs(wait.unwrap_or(180));
+    let request=authorized(client(180,endpoint)?.post(url).json(&super::model_compat::body(&endpoint.base_url,&endpoint.model,body)),key.as_deref());
+    let response=tokio::select!{biased;_=flag.wait()=>return Ok(()),response=tokio::time::timeout_at(first_deadline,request.send())=>response.map_err(|_|"等待主服务响应超时")?.map_err(|e|e.to_string())?}.error_for_status().map_err(|e|e.to_string())?;
+    let _=app.emit("mvp_answer_phase",serde_json::json!({"requestId":request_id,"phase":"响应就绪","elapsedMs":started.elapsed().as_millis()}));
+    let mut stream=response.bytes_stream();let mut first_token=true;
+    let (result,mut decoder)=super::answer_pump::pump(&mut stream,endpoint.api=="ollama",flag,first_deadline,Duration::from_secs(if wait.is_some(){20}else{180}),|token|{
+        if first_token&&replace{let _=app.emit("mvp_answer_reset",serde_json::json!({"requestId":request_id,"model":endpoint.model}));}first_token=false;
+        let _=app.emit("mvp_answer_token",serde_json::json!({"requestId":request_id,"token":token}));
+    }).await;
+    for (phase,elapsed) in decoder.timings(){let _=app.emit("mvp_answer_phase",serde_json::json!({"requestId":request_id,"phase":phase,"elapsedMs":elapsed,"duration":true}));}
+    if decoder.usage().is_some()||endpoint.api!="deepseek"||result.is_err(){save_usage(app,endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));}
+    else{let app=app.clone();let endpoint=endpoint.clone();tokio::spawn(async move{let _=tokio::time::timeout(Duration::from_secs(5),async{while let Some(Ok(chunk))=stream.next().await{decoder.push(&chunk);if decoder.usage().is_some(){break;}}}).await;save_usage(&app,&endpoint,decoder.usage().unwrap_or(&serde_json::Value::Null));});}
     result
 }
 
@@ -365,7 +352,7 @@ pub async fn mvp_explain(app: AppHandle, endpoint: ModelEndpoint, question: Stri
     } else {
         serde_json::json!({"model":endpoint.model,"messages":messages,"stream":false,"max_tokens":1024})
     };
-    let value: serde_json::Value = authorized(client(90, &endpoint)?.post(url).json(&body), key.as_deref())
+    let value: serde_json::Value = authorized(client(90, &endpoint)?.post(url).json(&super::model_compat::body(&endpoint.base_url,&endpoint.model,body)), key.as_deref())
         .send().await.map_err(|e| e.to_string())?
         .error_for_status().map_err(|e| e.to_string())?
         .json().await.map_err(|e| e.to_string())?;
@@ -561,7 +548,7 @@ pub(super) async fn completion_json_payload(app: &AppHandle, endpoint: &ModelEnd
     };
     let key = credential(&app, &endpoint)?;
     let http = client(90, &endpoint)?;
-    let mut response = authorized(http.post(&url).json(&body), key.as_deref()).send().await.map_err(|e| e.to_string())?;
+    let mut response = authorized(http.post(&url).json(&super::model_compat::body(&endpoint.base_url,&endpoint.model,body.clone())), key.as_deref()).send().await.map_err(|e| e.to_string())?;
     if endpoint.api == "openai" && matches!(response.status().as_u16(), 400 | 422) {
         let mut plain = body.clone();
         if let Some(object) = plain.as_object_mut() { object.remove("response_format"); }

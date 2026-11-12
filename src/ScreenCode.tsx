@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import {Camera,Copy,Square,RefreshCw} from "lucide-react";
 import type {ModelConfig} from "./modelProviders";
 import type {HistoryRecorder} from "./history";
+import type {TaskAttachment} from './taskContext';
 import "./screen-code.css";
 
 export const DEFAULT_SCREEN_SHORTCUT="F8";
@@ -14,7 +15,7 @@ export const CODE_LANGUAGES=["Python 3","C++17","Java","JavaScript"];
 type CapturedScreen={text:string;width:number;height:number;preview:string};
 type CodeEndpoint=ModelConfig&{credentialSlot:string};
 type SolverOptions={enabled:boolean;shortcutEnabled:boolean;blocked:()=>boolean;shortcut:string;forbidden:string[];
-  language:string;endpoint:CodeEndpoint;history:HistoryRecorder;onOpen:()=>void};
+  language:string;endpoint:CodeEndpoint;backupEndpoint?:CodeEndpoint|null;fallbackWaitSeconds?:number;history:HistoryRecorder;onOpen:()=>void;onContext?:(value:TaskAttachment|null)=>void};
 
 export function useScreenCode(options:SolverOptions){
  const opts=useRef(options);opts.current=options;
@@ -24,6 +25,7 @@ export function useScreenCode(options:SolverOptions){
  const [error,setError]=useState("");const [shortcutError,setShortcutError]=useState("");
  const epoch=useRef(0);const request=useRef("");const capturePending=useRef(false);
  const text=useRef("");const mounted=useRef(true);
+ const displayTask=useRef<{id:string;question:string;started:number;recorded:boolean;history:ReturnType<HistoryRecorder['scope']>}|null>(null);
  const queue=useRef<Promise<void>>(Promise.resolve());const registered=useRef("");
  const cancel=useCallback(()=>{
   epoch.current++;const id=request.current;request.current="";
@@ -36,14 +38,18 @@ export function useScreenCode(options:SolverOptions){
   if(problem.length>24000){setError("请将文字缩减到24000字以内，保留当前题目、约束与样例。");setPhase("idle");return;}
   if(turn!==epoch.current)return;
   const id=crypto.randomUUID();request.current=id;text.current="";setAnswer("");setError("");setPhase("generating");
+  const attachment:TaskAttachment={id,kind:'screen_code',text:problem,language,answer:'',complete:false};
+  opts.current.onContext?.(attachment);
   const stops:UnlistenFn[]=[];let failure="";let cancelled=false;let completed=false;let received="";
   const current=()=>mounted.current&&turn===epoch.current&&request.current===id;
   history.ensure("manual","截屏代码题");
-  history.record("question",problem,{coding:true,language},`${id}-question`);
+  const saved=history.scope();displayTask.current={id,question:problem,started:performance.now(),recorded:false,history:saved};
+  saved.record("question",problem,{coding:true,language},`${id}-question`);
   try{
    stops.push(await listen<{requestId:string;token:string}>("mvp_answer_token",event=>{
-    if(event.payload.requestId===id&&current()){received+=event.payload.token;text.current=received;setAnswer(received);}
+    if(event.payload.requestId===id&&current()){received+=event.payload.token;text.current=received;setAnswer(received);opts.current.onContext?.({...attachment,answer:received});}
    }));
+   stops.push(await listen<{requestId:string}>("mvp_answer_reset",event=>{if(event.payload.requestId===id&&current()){received='';text.current='';setAnswer('');opts.current.onContext?.(attachment);}}));
    stops.push(await listen<{requestId:string;error?:string|null}>("mvp_answer_done",event=>{
     if(event.payload.requestId!==id||!current())return;
     completed=true;failure=event.payload.error||"";if(failure)setError(failure);
@@ -51,19 +57,20 @@ export function useScreenCode(options:SolverOptions){
    if(endpoint.api==="ollama")await invoke("start_local_service",{service:"ollama"});
    if(!current()){cancelled=true;return;}
    await invoke("mvp_answer",{endpoint:await history.endpoint(endpoint,"截屏代码题解答",current),requestId:id,question:problem,
-    codeQuestion:true,focus:[],keyTerms:[],constraints:[language],uncertainTerms:[]});
+    codeQuestion:true,focus:[],keyTerms:[],constraints:[language],uncertainTerms:[],backupEndpoint:opts.current.backupEndpoint||null,fallbackWaitSeconds:opts.current.fallbackWaitSeconds});
    if(current()&&!text.current.trim()&&!failure)throw new Error("模型没有返回解答，请检查模型连接后重试。");
   }catch(cause){failure=String(cause);if(current())setError(failure);}
   finally{
    stops.forEach(stop=>stop());cancelled=cancelled||!current();
-   history.record("answer",received,{coding:true,question:"截屏代码题",language,complete:completed&&!failure&&!cancelled,error:failure||null,cancelled},`${id}-answer`);
+   if(current())opts.current.onContext?.({...attachment,answer:received,complete:completed&&!failure&&!cancelled});
+   saved.record("answer",received,{coding:true,question:problem,language,complete:completed&&!failure&&!cancelled,error:failure||null,cancelled},`${id}-answer`);
    if(current()){request.current="";setPhase("idle");}
   }
  },[]);
  const screenshot=useCallback(async()=>{
   if(!opts.current.enabled||opts.current.blocked()||capturePending.current)return;
   cancel();const turn=epoch.current;capturePending.current=true;
-  opts.current.onOpen();setPhase("capturing");setError("");setAnswer("");setCapture(null);
+  opts.current.onOpen();opts.current.onContext?.(null);setPhase("capturing");setError("");setAnswer("");setCapture(null);
   let recognitionFinished=false;
   try{
    const result=await invoke<CapturedScreen>("capture_code_screen");
@@ -79,6 +86,7 @@ export function useScreenCode(options:SolverOptions){
   cancel();opts.current.onOpen();void generate(draft,epoch.current);
  },[cancel,generate,draft]);
  const screenshotRef=useRef(screenshot);screenshotRef.current=screenshot;
+ useEffect(()=>{const task=displayTask.current;if(!answer.trim()||!task||task.recorded)return;task.recorded=true;task.history.record('visibility',task.question,{requestId:task.id,coding:true,timeToVisibleMs:Math.round(performance.now()-task.started)},`${task.id}-visible`);},[answer]);
  useEffect(()=>{
   let disposed=false;const shortcut=options.shortcut;
   const sync=async()=>{
@@ -118,7 +126,7 @@ export function ScreenCodePanel({solver,language,onLanguage,shortcut}:{solver:Re
    <label>默认语言<select aria-label="代码解答语言" value={language} onChange={e=>onLanguage(e.target.value)} disabled={solver.busy}>{CODE_LANGUAGES.map(x=><option key={x}>{x}</option>)}</select></label>
    {solver.busy&&<button className="download-btn" onClick={solver.cancel}><Square size={13}/>停止</button>}
   </div>
-  <p className="screen-code-help">按 {shortcut} 截取鼠标所在屏幕并解题，自动排除本软件窗口。模型先筛选题干、约束和样例，再给出思路与逐行注释代码。仅识别文字发送给当前回答模型，截图留在内存中。</p>
+  <p className="screen-code-help">按 {shortcut} 截取鼠标所在屏幕并解题，自动排除本软件窗口。题目、修正后的文字与解答会保留在本场上下文，后续可以直接口述追问。仅识别文字发送给回答模型，截图留在内存中。</p>
   {solver.shortcutError&&<p className="error-box" role="alert">{solver.shortcutError}</p>}
   {solver.error&&<p className="error-box" role="alert">{solver.error}</p>}
   {solver.phase==="capturing"&&<p role="status"><RefreshCw size={14}/>正在截屏并识别文字…</p>}

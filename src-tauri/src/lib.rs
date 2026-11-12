@@ -534,6 +534,8 @@ pub fn run() {
             history_commands::history_read,
             history_commands::history_delete,
             history_commands::history_export,
+            commands::session_recording::history_recording,
+            commands::session_recording::history_export_audio,
             // == COMMANDS: intelligence ==
             intelligence_commands::generate_assist,
             intelligence_commands::cancel_generation,

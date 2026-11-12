@@ -18,6 +18,7 @@ export class AnswerRace {
     if((!this.selected || this.selected.error) && readablePreview(branch.text))this.selected=branch;
     return true;
   }
+  reset(id:string){const branch=this.branches.find(item=>item.id===id);if(!branch||branch.done)return;branch.text='';branch.firstMs=null;branch.error='';if(this.selected===branch)this.selected=null;}
   finish(id:string,error?:string,elapsed=0) {
     const branch=this.branches.find(item=>item.id===id);
     if(!branch || branch.done)return false;

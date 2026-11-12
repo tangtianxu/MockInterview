@@ -11,7 +11,9 @@ export class HistoryRecorder {
   private send(command:string,args:Record<string,unknown>,ready?:Promise<boolean>){const next=this.queue.catch(()=>{}).then(async()=>{if(ready&&!await ready)return;return this.transport(command,args);});this.queue=next;void next.catch(cause=>this.report(`历史保存失败：${String(cause)}`));return next;}
   begin(mode:HistorySession["mode"],title:string){if(this.sessionId)this.end();const id=crypto.randomUUID();this.sessionId=id;this.report("");this.ready=this.send("history_begin",{session:{id,mode,title:title.slice(0,160),startedAt:new Date().toISOString(),endedAt:null}}).then(()=>true,()=>false);return id;}
   ensure(mode:HistorySession["mode"],title:string){return this.sessionId || this.begin(mode,title);}
-  record(kind:string,text:string,data:Record<string,any>={},id:string=crypto.randomUUID(),buffered=false){const sessionId=this.sessionId;const ready=this.ready;if(!sessionId||!ready)return;const entry={id,kind,text,at:new Date().toISOString(),data};
+  scope(){const sessionId=this.sessionId,ready=this.ready;return {record:(kind:string,text:string,data:Record<string,any>={},id:string=crypto.randomUUID(),buffered=false)=>this.recordInSession(sessionId,ready,kind,text,data,id,buffered)};}
+  record(kind:string,text:string,data:Record<string,any>={},id:string=crypto.randomUUID(),buffered=false){this.recordInSession(this.sessionId,this.ready,kind,text,data,id,buffered);}
+  private recordInSession(sessionId:string|null,ready:Promise<boolean>|null,kind:string,text:string,data:Record<string,any>,id:string,buffered:boolean){if(!sessionId||!ready)return;const entry={id,kind,text,at:new Date().toISOString(),data};
     if(buffered){this.pending.set(`${sessionId}:${id}`,{sessionId,entry,ready});if(!this.timer)this.timer=setTimeout(()=>this.drain(),300);}
     else {this.pending.delete(`${sessionId}:${id}`);void this.send("history_record",{sessionId,entry},ready);}
   }

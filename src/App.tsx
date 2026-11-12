@@ -20,6 +20,8 @@ import {AnswerText} from "./AnswerText";
 import {SoftwareUpdate,useSoftwareUpdate} from "./SoftwareUpdate";
 import {InAppActions} from "./ActionPanel";
 import {useHistoryRecorder} from "./history";
+import {FallbackSettings,backupEndpoint,type BackupSettings} from './FallbackSettings';
+import {recognitionAttachment,type TaskAttachment} from './taskContext';
 import {HistoryView} from "./HistoryView";
 import {KnowledgeView} from "./KnowledgeView";
 import {knowledgeForQuestion,readKnowledgeSnapshot,type KnowledgeContext} from "./knowledge";
@@ -49,6 +51,7 @@ type Settings = {
   decision: ModelConfig; answer: ModelConfig; answerInstructions: string;
   sharedModelConnection: boolean; separateDecision?: ModelConfig;
   parallelAnswer: boolean; parallelLocal: ModelConfig;
+  backup:BackupSettings;recordAudio:boolean;
   launcherOnTop: boolean; quitShortcut: string; screenShortcut:string; screenCodeLanguage:string;
   compactView: boolean; transcriptVisible: boolean; answerVisible: boolean;
   theme: "dark" | "light"; opacity: number;
@@ -81,6 +84,7 @@ const defaults: Settings = {
   decision: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answer: {api:"deepseek",baseUrl:"https://api.deepseek.com",model:"deepseek-flash",modelSelection:"auto"},
   answerInstructions: "",
+  backup:{enabled:false,model:serviceDefaults("dashscope"),wait:12},recordAudio:true,
   sharedModelConnection: true,
   parallelAnswer: false, parallelLocal: {api:"ollama",baseUrl:"http://127.0.0.1:11434",model:"qwen3:4b-instruct",modelSelection:"manual"},
 };
@@ -112,6 +116,8 @@ function loadSettings(input?: unknown): Settings {
       decisionFinalOnly:old.decisionFinalOnly===true,
       decisionIntervalSeconds:decisionIntervalSeconds(old.decisionIntervalSeconds),
       selfIntroduction:typeof old.selfIntroduction === "string" ? old.selfIntroduction.slice(0,4000) : "",
+      backup:{enabled:old.backup?.enabled===true,model:{...defaults.backup.model,...old.backup?.model},wait:[8,12,20,30,60].includes(old.backup?.wait)?old.backup.wait:12},
+      recordAudio:old.recordAudio!==false,
       parallelAnswer:old.parallelAnswer===true,
       parallelLocal:{...defaults.parallelLocal,...old.parallelLocal,api:"ollama"},
       targetRole:typeof old.targetRole === "string" ? old.targetRole.slice(0,120) :
@@ -178,7 +184,7 @@ function loadDiagnostics(): DiagnosticEntry[] {
   catch {return [];}
 }
 
-function credentialSlot(config: ModelConfig, stage: "decision" | "answer"): string {
+function credentialSlot(config: ModelConfig, stage: "decision" | "answer" | "fallback"): string {
   try {new URL(config.baseUrl);return `interview_cue_${stage}@${config.baseUrl.trim().replace(/\/+$/,"")}`;}
   catch {return `interview_cue_${stage}@invalid`;}
 }
@@ -272,6 +278,7 @@ function Overlay() {
 function Main() {
   const version = useAppVersion();
   const [workspaceMode, setWorkspaceMode] = useState<"practice" | "assist">("practice");
+  const taskAttachmentRef=useRef<TaskAttachment|null>(null);
   const [answerView,setAnswerView]=useState<"voice"|"screen">("voice");
   const [recordingScreenShortcut,setRecordingScreenShortcut]=useState(false);
   const [practiceSetupVisible,setPracticeSetupVisible] = useState(true);
@@ -475,7 +482,7 @@ function Main() {
   quitRef.current=async()=>{
     if(quittingRef.current)return;
     quittingRef.current=true;
-    try {liveHistory.end();practiceHistoryRecorder.end();await flushProfile();await exit(0);}
+    try {screen.cancel();if(runningRef.current)await invoke("stop_capture");liveHistory.end();practiceHistoryRecorder.end();await flushProfile();await exit(0);}
     catch(cause){setProfileError(`关闭前保存配置失败，程序仍保持打开：${String(cause)}`);}
     finally{quittingRef.current=false;}
   };
@@ -490,7 +497,9 @@ function Main() {
     blocked:()=>updater.busy||modelRemovalRef.current||knowledgeBusy||!profileReady,
     shortcut:settings.screenShortcut,forbidden:[settings.quitShortcut,restoreShortcutRef.current],
     language:settings.screenCodeLanguage,endpoint:endpoint(settings.answer,"answer"),history:liveHistory,
-    onOpen:()=>{setAnswerView("screen");setSettings(current=>({...current,answerVisible:true}));}});
+    backupEndpoint:backupEndpoint(settings.backup),fallbackWaitSeconds:settings.backup.wait,
+    onContext:value=>{if(value&&value.id!==taskAttachmentRef.current?.id){const question=`截图题目：${value.text.slice(0,1000)}`;questionRef.current=question;questionHistoryRef.current=rememberQuestion(questionHistoryRef.current,question).history;acceptedEvidenceRef.current={question,evidence:[]};}taskAttachmentRef.current=value;},
+    onOpen:()=>{cancelAnswer();setAnswerView("screen");setSettings(current=>({...current,answerVisible:true}));}});
   const codeOverlayRef=useRef<OverlayState|null>(null);
   codeOverlayRef.current=workspaceMode==="assist"&&answerView==="screen"?{
     question:"屏幕代码题",hint:screen.answer||screen.error||(screen.phase==="capturing"?"正在截屏识题…":"展示题目后按 "+settings.screenShortcut),
@@ -1018,6 +1027,8 @@ function Main() {
     constraints: string[], terms: string[], transition:"first"|"new"|"revision", asrAt:number|null) => {
     if(softwareUpdatingRef.current || modelRemovalRef.current)return;
     pendingEvidenceRef.current=[];
+    setAnswerView("voice");
+    const taskAttachment=taskAttachmentRef.current;
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
@@ -1093,6 +1104,7 @@ function Main() {
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
         await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(endpoint(config,"answer"),"回答生成",()=>answerRaceRef.current===race),requestId:id,
           question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
+          taskAttachment,backupEndpoint:config.api!=="ollama"?backupEndpoint(settings.backup):null,fallbackWaitSeconds:settings.backup.wait,
           knowledgeContext,
           practiceContext:{...practiceBackground({scope:"comprehensive",difficulty:"medium",role:settings.targetRole,
             topics:settings.focusTopics,domain:settings.domain,local:config.api==="ollama",resume:resumeRef.current,analysis:resumeAnalysisRef.current}),consentToSendResume:true},
@@ -1102,6 +1114,7 @@ function Main() {
   }, [cancelAnswer,finishAnswer,logDiagnostic,showAnswerSnapshot,publishHint]);
 
   const showSelfIntroduction = useCallback((sourceId:string,asrAt:number|null) => {
+    setAnswerView('voice');
     if(!settingsRef.current.selfIntroduction.trim()){
       activeSourceRef.current=sourceId;
       void startAnswer("请进行自我介绍",[],[],[],[],"new",asrAt);
@@ -1188,7 +1201,8 @@ function Main() {
       const turns=taskWindow(segmentsRef.current,[partialRef.current,micPartialRef.current],pending.turns,settingsRef.current.mode);
       const decision = await invoke<Decision>("mvp_decide", {
         endpoint:await liveHistory.endpoint(endpoint(settingsRef.current.decision,"decision",settingsRef.current.sharedModelConnection),"语义判别",()=>runningRef.current&&epoch===sessionEpochRef.current),
-        input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,
+        backupEndpoint:backupEndpoint(settingsRef.current.backup),fallbackWaitSeconds:settingsRef.current.backup.wait,
+        input:{ turns, mode:settingsRef.current.mode, previousQuestion:questionRef.current,taskAttachment:recognitionAttachment(taskAttachmentRef.current),
           previousEvidence:acceptedEvidenceRef.current.question===questionRef.current?acceptedEvidenceRef.current.evidence:[],
           pendingEvidence:pendingEvidenceRef.current,
           projectKnowledge:knowledgeEnabledRef.current,
@@ -1306,6 +1320,7 @@ function Main() {
         if(!branch)return;
         logDiagnostic("回答阶段",`${branch.source=== "local" ? "本地" : "API"} · ${event.payload.phase} · ${Math.round(event.payload.elapsedMs)} ms${event.payload.duration ? "（阶段耗时）" : "（请求后）"}`);
       }));
+      stops.push(await listen<{requestId:string}>("mvp_answer_reset",event=>{answerRaceRef.current?.reset(event.payload.requestId);}));
       stops.push(await listen<{requestId:string;token:string}>("mvp_answer_token", event => {
         const race=answerRaceRef.current;
         if(!race)return;
@@ -1418,10 +1433,13 @@ function Main() {
       }
       const offline=settings.mode==="offline";
       const {you,them}=capturePartyConfigs(settings);
-      await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them)});
+      liveHistory.begin("live",offline ? "线下面试 · 麦克风测试" : settings.mode==="video" ? "视频测试" : "实时问答");
+      await liveHistory.flush();
+      if(taskAttachmentRef.current){const attachment=taskAttachmentRef.current;liveHistory.record("question",attachment.text,{coding:true,language:attachment.language,taskAttachment:recognitionAttachment(attachment),carriedFromManual:true});}
+      await invoke("start_capture_per_party",{youConfig:JSON.stringify(you),themConfig:JSON.stringify(them),recording:settings.recordAudio?{sessionId:liveHistory.sessionId,microphone:settings.mode==="live"}:null});
       segmentsRef.current=[];setSegments([]);setPartial(null);partialRef.current=null;
       micPartialRef.current=null;setMicPartial(null);savedIntroductionRef.current=false;
-      questionRef.current="";activeSourceRef.current="";
+      questionRef.current=taskAttachmentRef.current?`截图题目：${taskAttachmentRef.current.text.slice(0,1000)}`:"";questionHistoryRef.current=questionRef.current?[questionRef.current]:[];activeSourceRef.current="";
       acceptedEvidenceRef.current={question:"",evidence:[]};
       pendingEvidenceRef.current=[];
       revisedSourceRef.current="";manualOverrideSourceRef.current="";
@@ -1432,25 +1450,27 @@ function Main() {
       setDecisionMs(null);setAnswerMs(null);setVisibleMs(null);setCompleteMs(null);setTranscriptToCompleteMs(null);
       publishHint("");decisionSchedulerRef.current.reset();
       if(decisionTimerRef.current){clearTimeout(decisionTimerRef.current);decisionTimerRef.current=null;}
-      liveHistory.begin("live",offline ? "线下面试 · 麦克风测试" : settings.mode==="video" ? "视频测试" : "实时问答");
       sessionEpochRef.current++;runningRef.current=true;setRunning(true);setStatus("listening");
       logDiagnostic("开始聆听",`${settings.mode} · ${settings.sttMode==="local" ? `${settings.sttEngine}/${settings.sttModel}` : `${settings.sttApiProvider}/${settings.sttApiModel}`} · 判别 ${settings.decision.api} · 回答 ${settings.answer.api}`);
     } catch (cause) {
       await invoke("stop_capture").catch(()=>{});
+      liveHistory.end();
       setStatus("error");setError(`无法开始采集：${String(cause)}`);
     }
   };
   const stop = async () => {
+    if(captureStartingRef.current)return;captureStartingRef.current=true;setStartingService(true);
     sessionEpochRef.current++;runningRef.current=false;setRunning(false);setStatus("idle");
     decisionSchedulerRef.current.reset();
     if (decisionTimerRef.current){clearTimeout(decisionTimerRef.current);decisionTimerRef.current=null;}
     cancelAnswer();answerDisplayRef.current=null;
+    screen.cancel();taskAttachmentRef.current=null;
     partialRef.current=null;setPartial(null);micPartialRef.current=null;setMicPartial(null);
     setMicSpeaking(false);micLastActiveRef.current=0;
     detailRequestRef.current="";setDetailLoading(false);
     logDiagnostic("结束聆听");
-    liveHistory.end();
     try {await invoke("stop_capture");} catch (cause) {setError(`停止采集失败：${String(cause)}`);}
+    liveHistory.end();captureStartingRef.current=false;setStartingService(false);
   };
   const toggleOverlay = async () => {
     const overlay = await WebviewWindow.getByLabel("overlay");
@@ -1778,6 +1798,8 @@ function Main() {
         <div className="setting-group"><div className="setting-heading"><Headphones size={18}/> 音频设备 <button className="text-link" onClick={()=>void refreshDevices()}>刷新</button></div>
         <label>采集模式<select value={settings.mode} onChange={e=>update({mode:e.target.value as Mode})} disabled={running || startingService || practiceActive || practiceWorking}>
           <option value="live">远程面试 · 系统声音提问</option><option value="video">视频测试 · 双方同一音轨</option><option value="offline">线下面试 · 麦克风提问</option></select></label>
+        <label className="check-row"><input type="checkbox" checked={settings.recordAudio} disabled={running||startingService} onChange={e=>update({recordAudio:e.target.checked})}/>保存本场录音，供历史回放</label>
+        <p className="setting-help">远程面试保存面试音频和麦克风；视频测试只保存所选系统音频，线下面试只保存所选提问麦克风。录音仅保存在本机，不会自动上传；约 230 MB/小时。可在历史详情播放、拖动定位、导出，删除会话会一并删除录音。此前会话不能补回音频。</p>
         <label>面试音频输出设备<select value={settings.output} onChange={e=>update({output:e.target.value})} disabled={running || startingService || settings.mode==="offline"}><option value="default">系统默认输出</option>{devices.outputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>{settings.mode==="offline" ? "提问麦克风" : "我的麦克风"}<select value={settings.mic} onChange={e=>update({mic:e.target.value})} disabled={running || startingService || practiceActive || practiceWorking}><option value="default">系统默认麦克风</option>{devices.inputs.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label className="connection-sharing"><input type="checkbox" checked={settings.micTranscription} disabled={running || startingService || practiceActive || settings.mode!=="live"}
@@ -1892,6 +1914,7 @@ function Main() {
               onChange={e=>update({parallelLocal:{...settings.parallelLocal,baseUrl:e.target.value}})}/></label>
           </>}
         </div>
+        <FallbackSettings value={settings.backup} disabled={running||practiceActive||screen.busy} onChange={backup=>update({backup})}/>
         <div className="setting-group"><label>语义判别最小间隔<select aria-label="语义判别最小间隔" value={settings.decisionIntervalSeconds} disabled={running || practiceWorking}
           onChange={e=>update({decisionIntervalSeconds:Number(e.target.value)})}>
           {[...new Set([2,3,5,8,10,15,30,settings.decisionIntervalSeconds])].sort((a,b)=>a-b).map(seconds=><option key={seconds} value={seconds}>{seconds} 秒{seconds===5?"（推荐）":""}</option>)}</select></label>

@@ -1,6 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {HistoryRecorder} from '../src/history.ts';
+
+test('a screenshot result finishing after the session changes stays with its original session',async()=>{
+ const calls=[];const recorder=new HistoryRecorder(()=>{},async(command,args)=>{calls.push({command,args});});
+ const original=recorder.begin('manual','截图题');const operation=recorder.scope();recorder.end();
+ const next=recorder.begin('live','聆听');operation.record('answer','迟到的截图解答',{complete:false},'screen-answer');
+ recorder.record('question','新问题');recorder.end();await recorder.flush();
+ const answers=calls.filter(c=>c.command==='history_record');assert.equal(answers[0].args.sessionId,original);assert.equal(answers[1].args.sessionId,next);
+});
 test('history creates a session before entries, finalizes buffered streams and separates sessions',async()=>{
  const calls=[];const errors=[];const recorder=new HistoryRecorder(error=>errors.push(error),async(command,args)=>{calls.push({command,args});});
  const first=recorder.begin('live','第一场');recorder.record('answer','旧增量',{complete:false},'answer-1',true);recorder.record('answer','完整内容',{complete:true},'answer-1');

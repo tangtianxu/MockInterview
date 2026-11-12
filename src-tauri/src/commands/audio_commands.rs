@@ -341,10 +341,11 @@ pub async fn stop_capture(app: AppHandle) -> Result<(), String> {
                 log::info!("Audio capture stopped via command");
                 info
             }
-            None => return Err("No audio manager initialized".to_string()),
+            None => None,
         }
     };
 
+    super::session_recording::finish().await?;
     // Store recording info for end_meeting to pick up.
     // The frontend calls stopCapture() then endMeeting() in sequence, so
     // we park the info here and end_meeting consumes it.
@@ -815,6 +816,7 @@ pub async fn start_capture_per_party(
     app: AppHandle,
     you_config: String,
     them_config: String,
+    recording: Option<super::session_recording::RecordingOptions>,
 ) -> Result<(), String> {
     use crate::audio::PartyAudioConfig;
 
@@ -848,6 +850,8 @@ pub async fn start_capture_per_party(
         }
     }
 
+    super::session_recording::finish().await?;
+
     log::info!(
         "Starting per-party capture: You={{device='{}', input={}, stt={}}}, Them={{device='{}', input={}, stt={}}}",
         you.device_id,
@@ -859,7 +863,7 @@ pub async fn start_capture_per_party(
     );
 
     // Create the audio chunk channel
-    let (tx, mut rx) = mpsc::channel::<crate::audio::AudioChunk>(256);
+    let (tx, rx) = mpsc::channel::<crate::audio::AudioChunk>(256);
 
     // Use the existing AudioCaptureManager for the physical capture
     // Map "You" → mic device, "Them" → system device (backward compat with existing manager)
@@ -876,6 +880,9 @@ pub async fn start_capture_per_party(
     // Validate provider/model configuration before opening any hardware stream.
     let you_stt = create_stt_provider_for_party(&you, &state, &app, "You").await?;
     let them_stt = create_stt_provider_for_party(&them, &state, &app, "Them").await?;
+    let mut rx = if let Some(options) = recording {
+        super::session_recording::tap(&app,options,rx)?
+    } else { rx };
 
     // ── IPolicyConfig: override system default mic BEFORE starting capture ──
     // Web Speech and Windows Speech always use the OS default recording device.

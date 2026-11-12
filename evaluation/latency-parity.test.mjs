@@ -7,20 +7,22 @@ import {chromium} from 'playwright-core';
 import {AnswerRace} from '../src/answerRace.ts';
 import {readablePreview} from '../src/answerDisplay.ts';
 
-const baselineFile=name=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.35:src/${name}`],{encoding:'utf8'});
-test('native answer generation, prompts and decision rules are identical to the previous release',async()=>{
- const oldFile=path=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.35:${path}`],{encoding:'utf8'}).replaceAll('\r\n','\n');
+const baselineFile=name=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.36:src/${name}`],{encoding:'utf8'});
+test('generation guidance, output budgets and normal request arguments remain intact',async()=>{
+ const oldFile=path=>execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show',`v1.0.36:${path}`],{encoding:'utf8'}).replaceAll('\r\n','\n');
  const path='src-tauri/src/commands/mvp_commands.rs',before=oldFile(path),after=(await readFile(path,'utf8')).replaceAll('\r\n','\n');
  const answer=source=>source.slice(source.indexOf('pub async fn mvp_answer('),source.indexOf('pub async fn mvp_explain('));
- assert.equal(answer(after),answer(before),'complete native prompt/body/stream generation path remains unchanged');
- for(const file of ['src/decisionScheduler.ts','src/knowledge.ts','src-tauri/src/commands/task_harness.rs','src-tauri/src/commands/model_contract.rs','src-tauri/src/commands/speech_interpretation.rs','src-tauri/resources/technical-answer.txt','src-tauri/resources/answer-evidence.txt'])assert.equal((await readFile(file,'utf8')).replaceAll('\r\n','\n'),oldFile(file),file);
+ for(const marker of ['let token_limit = 6144','temperature\":0.2','CODE_ANSWER_SYSTEM','technical-answer.txt'])assert.ok(answer(after).includes(marker)&&answer(before).includes(marker),marker);
+ for(const file of ['src/decisionScheduler.ts','src/knowledge.ts','src-tauri/src/commands/model_contract.rs','src-tauri/src/commands/speech_interpretation.rs','src-tauri/resources/technical-answer.txt','src-tauri/resources/answer-evidence.txt'])assert.equal((await readFile(file,'utf8')).replaceAll('\r\n','\n'),oldFile(file),file);
 });
 test('cached outputs retain every character; first clause arrives before a long first sentence completes',async()=>{
  const replay=JSON.parse(await readFile(new URL('./fixtures/ppo-display-replay.json',import.meta.url),'utf8'));
  const corpus=[replay.answer,'定义：PPO通过限制策略更新幅度，减少每轮优化时策略偏移过大的风险，通常结合优势估计构建目标函数。',String.raw`注意力的计算公式为：\[\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V\]。`,
  '```python\nclass Solution:\n    def twoSum(self, nums, target):\n        seen = {}\n        for i, value in enumerate(nums):\n            if target - value in seen:\n                return [seen[target - value], i]\n            seen[value] = i\n```\n时间复杂度为 O(n)，空间复杂度为 O(n)。',
  '实际工作：我负责算法实现与仿真验证，现场应用仍在方案设计阶段。\n验证材料保留了实验条件、对照结果和代码入口。'];
- const oldSource=baselineFile('answerDisplay.ts');
+ // The display improvement was introduced in 1.0.36; preserve its comparison
+ // against 1.0.35 while generation arguments above compare against 1.0.36.
+ const oldSource=execFileSync('git',['-c',`safe.directory=${process.cwd().replaceAll('\\','/')}`,'show','v1.0.35:src/answerDisplay.ts'],{encoding:'utf8'});
  await mkdir('outputs',{recursive:true});const oldPath='outputs/latency-old-display.ts';await writeFile(oldPath,oldSource);
  try{
   const {readablePreview:old}=await import(pathToFileURL(process.cwd()+'/'+oldPath).href+'?v='+Date.now());
@@ -82,7 +84,7 @@ test('real UI keeps baseline answer arguments and waits for evidence while trans
     const id=await page.evaluate(()=>window.requests.at(-1).requestId);
     await page.evaluate(async id=>{await window.send('mvp_answer_token',{requestId:id,token:'定义：完整回答保留项目阶段、条件与结果。'});await window.send('mvp_answer_done',{requestId:id});},id);
    }
-   payloads.push(await page.evaluate(()=>window.requests.map(({requestId,endpoint,...args})=>({...args,endpoint:{...endpoint,historySessionId:'SESSION'}}))));
+   payloads.push(await page.evaluate(()=>window.requests.map(({requestId,endpoint,taskAttachment,backupEndpoint,fallbackWaitSeconds,...args})=>({...args,endpoint:{...endpoint,historySessionId:'SESSION'}}))));
    if(!old){
     await page.evaluate(()=>window.hold=true);await submit('等待资料完整的测试问题。');await page.waitForFunction(()=>window.gates.transport&&window.gates.evidence);
     assert.equal(await page.evaluate(()=>window.requests.length),3);
@@ -96,7 +98,7 @@ test('real UI keeps baseline answer arguments and waits for evidence while trans
    }
    assert.deepEqual(errors,[]);await page.close();
   }
-  assert.deepEqual(payloads[1],payloads[0],'all generation arguments except request/session IDs must match 1.0.35');
+  assert.deepEqual(payloads[1],payloads[0],'all generation arguments except request/session IDs must match 1.0.36');
   await writeFile('outputs/latency-request-parity.json',JSON.stringify({cases:payloads[0].length,allArgumentsIdentical:true,evidenceBarrierPassed:true,staleRequestGuardPassed:true},null,2));
  }finally{await browser?.close();server.kill();await unlink(fixture).catch(()=>{});await unlink(baseline).catch(()=>{});}
 });

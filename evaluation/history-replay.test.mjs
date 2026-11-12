@@ -1,0 +1,25 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {spawn} from 'node:child_process';import {mkdir,writeFile,unlink} from 'node:fs/promises';import {chromium} from 'playwright-core';
+test('history opens detail directly and plays a seekable recording with matching transcript and prompt',{timeout:60000},async()=>{
+ const fixture='outputs/history-replay-fixture.html';await mkdir('outputs',{recursive:true});
+ await writeFile(fixture,`<!doctype html><html><head><meta charset="UTF-8"></head><body class="theme-light" style="color:#183c36;background:#fffefa"><div id="root"></div><script type="module">
+ import React from 'react';import {createRoot} from 'react-dom/client';import {mockIPC,mockConvertFileSrc} from '@tauri-apps/api/mocks';import {HistoryView} from '/src/HistoryView';import '/src/index.css';import '/src/practice.css';
+ import {mockActionResponses} from '/evaluation/helpers/in-app-actions.mjs';mockActionResponses(kind=>kind==='save'?'C:/test/export.wav':true);
+ mockConvertFileSrc('windows');window.calls=[];const start=Date.parse('2026-11-12T00:00:00Z');const at=s=>new Date(start+s*1000).toISOString();const row=(id,kind,t,text,data={})=>({id,kind,at:at(t),text,data});
+ const session={id:'11111111-1111-4111-a111-111111111111',mode:'live',startedAt:at(0),endedAt:at(30),title:'回放测试'};
+ const entries=[row('t1','transcript',1,'解释 PPO',{speaker:'Them',timestampMs:start+1000}),row('q1','question',1.2,'解释 PPO'),row('v1','visibility',2,'解释 PPO',{requestId:'answer1'}),row('answer1-0','answer',3,'PPO 完整参考答案。',{question:'解释 PPO',complete:true}),...Array.from({length:100},(_,i)=>row('extra'+i,'transcript',i+4,'后续记录'+i,{speaker:'User'}))];
+ mockIPC(async(command,args)=>{window.calls.push({command,args});if(command==='history_list')return Array.from({length:100},(_,i)=>({...session,id:i?String(i):session.id,title:session.title+i}));if(command==='history_read')return {session,entries};if(command==='history_recording')return {path:'C:/test/replay.wav',startedAtMs:start,durationMs:30000,complete:true,microphone:true};return null;});
+ createRoot(document.getElementById('root')).render(React.createElement(HistoryView,{activeIds:[]}));
+ </script></body></html>`);
+ const server=spawn(process.execPath,['node_modules/vite/bin/vite.js','--configLoader','runner','--host','127.0.0.1','--port','5229','--strictPort'],{windowsHide:true,stdio:'pipe'});let output='';server.stdout.on('data',s=>output+=s);server.stderr.on('data',s=>output+=s);let browser;
+ const frames=16000*30,pcm=Buffer.alloc(44+frames*4);pcm.write('RIFF');pcm.writeUInt32LE(pcm.length-8,4);pcm.write('WAVEfmt ',8);pcm.writeUInt32LE(16,16);pcm.writeUInt16LE(1,20);pcm.writeUInt16LE(2,22);pcm.writeUInt32LE(16000,24);pcm.writeUInt32LE(64000,28);pcm.writeUInt16LE(4,32);pcm.writeUInt16LE(16,34);pcm.write('data',36);pcm.writeUInt32LE(frames*4,40);
+ try{const url='http://127.0.0.1:5229/'+fixture;for(let i=0;i<100;i++){if(server.exitCode!==null)throw Error(output);try{if((await fetch(url)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
+  browser=await chromium.launch({headless:true,channel:'msedge'});const page=await browser.newPage({viewport:{width:900,height:850}});page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.route('http://asset.localhost/**',route=>route.fulfill({status:200,contentType:'audio/wav',body:pcm,headers:{'Access-Control-Allow-Origin':'*','Accept-Ranges':'bytes'}}));await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
+  assert.equal(await page.locator('.history-session').count(),100);await page.locator('.history-session').first().click();await page.getByRole('button',{name:'播放录音',exact:true}).waitFor();assert.equal(await page.locator('.history-session').count(),0);assert.equal(await page.locator('.history-entry').count(),30);
+  await page.getByRole('button',{name:'播放录音',exact:true}).click();await page.waitForFunction(()=>document.querySelector('audio').currentTime>0.2);await page.getByRole('button',{name:'暂停录音',exact:true}).click();
+  await page.getByRole('slider',{name:'录音播放进度'}).fill('2.5');await page.locator('.replay-current').filter({hasText:'PPO 完整参考答案'}).waitFor();assert.ok(Math.abs(await page.locator('audio').evaluate(a=>a.currentTime)-2.5)<0.2);
+  await page.getByText('按时间浏览转录、问题与提示', {exact:false}).click();await page.locator('.replay-marks button').first().click();assert.ok(Math.abs(await page.locator('audio').evaluate(a=>a.currentTime)-1)<0.2);
+  await page.getByRole('button',{name:'导出录音',exact:true}).click();await page.waitForFunction(()=>window.calls.some(c=>c.command==='history_export_audio'));
+  await page.getByRole('button',{name:'继续查看后续记录',exact:true}).click();assert.equal(await page.locator('.history-entry').count(),60);
+  await page.locator('.history-replay').screenshot({path:'outputs/history-replay-ui.png'});await page.getByRole('button',{name:'返回会话列表',exact:true}).click();assert.equal(await page.locator('.history-session').count(),100);assert.deepEqual(errors,[]);
+ }finally{await browser?.close();server.kill();await unlink(fixture).catch(()=>{});}
+});
