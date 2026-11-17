@@ -333,6 +333,11 @@ pub fn knowledge_history_questions(app: AppHandle, id: String) -> Result<Vec<Que
     ))
 }
 #[command]
+pub fn knowledge_set_answer_source(app:AppHandle,source_id:String,enabled:bool)->Result<Snapshot,String>{
+    let _lock=IO.lock().map_err(|e|e.to_string())?;
+    let base=root(&app)?;kb::set_answer_source(&base,&source_id,enabled)?;kb::snapshot(&base)
+}
+#[command]
 pub async fn knowledge_lookup(app: AppHandle, query: String, context:Option<String>, history_session_id:Option<String>) -> Result<Lookup, String> {
     // Slow files/indexes must not occupy the command event loop while the page
     // proceeds with a normal answer after its evidence deadline.
@@ -992,12 +997,13 @@ impl AnswerContext {
         self.questions.retain(|q|snap.questions.iter().any(|v| {
                 v.id == q.id
                     && v.status == "confirmed"
+                    && kb::answer_question_enabled(&snap.library,v)
                     && v.answer == q.answer
                     && v.question == q.question
                     && v.project == q.project
                     && v.explanation == q.explanation
             }));
-        self.passages.retain(|p|!p.text.trim().is_empty()
+        self.passages.retain(|p|kb::answer_source_enabled(&snap.library,&p.source_id)&&!p.text.trim().is_empty()
                 && snap.library.sources.iter().any(|s| {
                     s.id == p.source_id
                         && s.hash == p.hash

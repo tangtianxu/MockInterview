@@ -18,6 +18,12 @@ export function practiceHistory(turns:{question:string;answer:string}[]) {
     history:turns.slice(-3).map(turn=>`题目：${turn.question}\n回答摘要：${turn.answer.slice(0,180)}`).join("\n")};
 }
 
+// A model-written resume analysis is an index for preparation, not another
+// independent source of personal facts. Runtime answers use the original text.
+export function answerBackground(input:Parameters<typeof practiceBackground>[0]):PracticeBackground{
+ return practiceBackground({...input,analysis:undefined});
+}
+
 export function repeatedPracticeQuestion(question:string,previous:string[]) {
   const key=(text:string)=>[...text.toLowerCase()].filter(char=>/[\p{L}\p{N}]/u.test(char)).join("");
   const candidate=key(question);

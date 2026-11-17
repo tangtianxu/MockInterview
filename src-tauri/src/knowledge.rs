@@ -35,6 +35,8 @@ pub struct Library {
     pub organization_mode: String,
     #[serde(default)]
     pub project_proposals: Vec<crate::knowledge_intake::ProjectProposal>,
+    #[serde(default, skip_serializing_if="Vec::is_empty")]
+    pub excluded_answer_sources:Vec<String>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -643,6 +645,9 @@ pub fn retrieve(
     query: &str,
     project: &str,
 ) -> Result<Vec<Passage>, String> {
+    retrieve_scoped(root,lib,query,project,false)
+}
+fn retrieve_scoped(root:&Path,lib:&Library,query:&str,project:&str,answer_only:bool)->Result<Vec<Passage>,String>{
     let expression = search_expression(query);
     if expression.is_empty() {
         return Ok(Vec::new());
@@ -667,7 +672,7 @@ pub fn retrieve(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     values.retain(|p| {
-        lib.sources.iter().any(|s| {
+        (!answer_only||(answer_source_enabled(lib,&p.source_id)&&crate::knowledge_search::evidence_score(query,&format!("{}\n{}\n{}",p.path,p.locator,p.text))>=0.20)) && lib.sources.iter().any(|s| {
             s.id == p.source_id
                 && s.hash == p.hash
                 && s.status == "ready"
@@ -680,6 +685,15 @@ pub fn retrieve(
 }
 pub fn lookup(root: &Path, query: &str) -> Result<Lookup, String> {
     lookup_with_context(root,query,"")
+}
+pub fn answer_source_enabled(lib:&Library,id:&str)->bool{!lib.excluded_answer_sources.iter().any(|v|v==id)}
+pub fn answer_question_enabled(lib:&Library,q:&Question)->bool{q.references.iter().all(|r|answer_source_enabled(lib,&r.source_id))}
+pub fn set_answer_source(root:&Path,id:&str,enabled:bool)->Result<(),String>{
+    let mut lib=load(root)?;
+    if !lib.sources.iter().any(|s|s.id==id){return Err("资料不存在，请刷新后重试".into());}
+    lib.excluded_answer_sources.retain(|v|v!=id);
+    if !enabled{lib.excluded_answer_sources.push(id.into());}
+    save_library(root,&lib)
 }
 pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Lookup, String> {
     let snap = snapshot(root)?;
@@ -717,6 +731,7 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
         .iter()
         .filter(|q| {
             q.status == "confirmed"
+                && answer_question_enabled(lib,q)
                 && (project.is_empty() || q.project.is_empty() || q.project == project)
         })
         .cloned()
@@ -734,7 +749,7 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
         None
     };
     let background=format!("{context}\n{}",lib.active_project);
-    let ranked=crate::knowledge_search::ranked(query,&background,&qs);
+    let ranked=crate::knowledge_search::answer_candidates(query,&background,&qs);
     let mut projects: Vec<_> = exacts
         .iter()
         .map(|q| q.project.clone())
@@ -750,7 +765,7 @@ pub fn lookup_with_context(root: &Path, query: &str, context:&str) -> Result<Loo
     projects.dedup();
     // A derived full-text index failure must not discard the independently
     // readable, confirmed question bank or prevent ordinary generation.
-    let (passages,note)=match retrieve(root,lib,query,project){
+    let (passages,note)=match retrieve_scoped(root,lib,query,project,true){
         Ok(values)=>(values,String::new()),
         Err(reason)=>(Vec::new(),format!("资料全文检索暂不可用，仍使用已采用问答：{reason}")),
     };
@@ -916,6 +931,28 @@ pub fn history_questions(value: &serde_json::Value) -> Vec<Question> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn obsolete_source_can_leave_runtime_without_deleting_files_or_adopted_answers(){
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let mut old=Source{id:Uuid::new_v4().to_string(),path:root.join("old.txt").to_string_lossy().into(),status:"ready".into(),..Default::default()};
+        fs::write(&old.path,"旧版资料").unwrap();
+        old.modified=stamp(Path::new(&old.path));
+        atomic(&root.join("sources").join(format!("{}.txt",old.id)),"旧版资料".as_bytes()).unwrap();
+        save_library(root,&Library{enabled:true,sources:vec![old.clone()],..Default::default()}).unwrap();
+        let q=save_question(root,Question{id:Uuid::new_v4().to_string(),question:"PPO是什么".into(),category:"技术基础".into(),answer:"已核准的原回答".into(),status:"confirmed".into(),references:vec![Reference{source_id:old.id.clone(),..Default::default()}],..Default::default()}).unwrap();
+        assert_eq!(lookup(root,"PPO是什么").unwrap().exact.unwrap().id,q.id);
+        set_answer_source(root,&old.id,false).unwrap();
+        let lib=load(root).unwrap();assert_eq!(lib.sources.len(),1);assert!(!answer_source_enabled(&lib,&old.id));
+        assert!(lookup(root,"PPO是什么").unwrap().exact.is_none());
+        assert_eq!(retrieve(root,&lib,"旧版资料","").unwrap().len(),1,"manual preparation keeps access to the source");
+        assert!(lookup(root,"旧版资料").unwrap().passages.is_empty(),"runtime honors the source usage choice");
+        assert_eq!(questions(root).0[0].status,"confirmed");assert_eq!(fs::read_to_string(&old.path).unwrap(),"旧版资料");
+        assert!(set_answer_source(root,"missing",false).is_err());
+        set_answer_source(root,&old.id,true).unwrap();
+        assert_eq!(lookup(root,"PPO是什么").unwrap().exact.unwrap().answer,q.answer);
+        let old_format:Library=serde_json::from_value(serde_json::json!({"sources":[]})).unwrap();
+        assert!(old_format.excluded_answer_sources.is_empty());
+    }
     #[test]
     fn saved_project_preference_never_hides_other_projects_in_overviews(){
         let dir=tempfile::tempdir().unwrap();let root=dir.path();

@@ -13,6 +13,7 @@ import { Activity, AudioLines, Check, ChevronDown, CircleHelp, FileText, Headpho
 import { questionTransition, sameQuestion } from "./decisionStability";
 import {DecisionScheduler,decisionIntervalSeconds,decisionEvidenceSource} from "./decisionScheduler";
 import { taskWindow,dialogueContext } from "./dialogueContext";
+import {answerConversation} from './answerContext';
 import {isSelfIntroductionRequest} from "./selfIntroduction";
 import { AnswerRace, rememberQuestion, type AnswerSource } from "./answerRace";
 import { MathText } from "./MathText";
@@ -32,7 +33,7 @@ import {connectModel,validateModelAddress} from "./modelConnection";
 import { connectionModel, modelServices, serviceId, serviceDefaults, providerDefaults, sharedConnectionDefault, patchModelConnection,
   type ModelApi, type ModelConfig, type ServiceId } from "./modelProviders";
 import { PracticeView, type Resume, type Analysis, type PracticeConfig } from "./PracticeView";
-import {practiceBackground} from './practiceSession';
+import {answerBackground} from './practiceSession';
 import {capturePartyConfigs,type CaptureMode as Mode} from "./captureConfig";
 import {usePanelLayout} from "./usePanelLayout";
 import {TestGuide} from "./TestGuide";
@@ -1049,6 +1050,7 @@ function Main() {
     liveHistory.ensure(runningRef.current?"live":"manual",runningRef.current?"实时问答":"手动问题测试");
     cancelAnswer();
     const settings=settingsRef.current;
+    const conversation=answerConversation(segmentsRef.current,[partialRef.current,micPartialRef.current],settings.mode);
     const selectedModels=runtimeModels(settings,preferBackupRef.current);
     const parallel=settings.parallelAnswer && selectedModels.answer.api!=="ollama";
     const configs=parallel ? [endpoint(settings.parallelLocal,"answer"),selectedModels.answer] : [selectedModels.answer];
@@ -1121,10 +1123,10 @@ function Main() {
         if(answerRaceRef.current!==race)return;
         const background=topicBackground(settings,resumeRef.current,resumeAnalysisRef.current,config.api==="ollama");
         await invoke("mvp_answer",{endpoint:await liveHistory.endpoint(config,"回答生成",()=>answerRaceRef.current===race),requestId:id,
-          question:nextQuestion,questionContext:context.previous,focus,keyTerms,constraints,uncertainTerms:terms,
+          question:nextQuestion,questionContext:context.previous,conversation,focus,keyTerms,constraints,uncertainTerms:terms,
           taskAttachment,backupEndpoint:config.api!=="ollama"?selectedModels.backup:null,fallbackWaitSeconds:settings.backup.wait,
           knowledgeContext,
-          practiceContext:{...practiceBackground({scope:"comprehensive",difficulty:"medium",role:settings.targetRole,
+          practiceContext:{...answerBackground({scope:"comprehensive",difficulty:"medium",role:settings.targetRole,
             topics:settings.focusTopics,domain:settings.domain,local:config.api==="ollama",resume:resumeRef.current,analysis:resumeAnalysisRef.current}),consentToSendResume:true},
           answerInstructions:[settings.answerInstructions,background && `术语与选题背景（不能作为经历事实）：${background}`].filter(Boolean).join("\n")});
       }catch(cause){if(answerRaceRef.current===race)finishAnswer(id,String(cause));}

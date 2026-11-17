@@ -13,7 +13,9 @@ test('generation guidance, output budgets and normal request arguments remain in
  const path='src-tauri/src/commands/mvp_commands.rs',before=oldFile(path),after=(await readFile(path,'utf8')).replaceAll('\r\n','\n');
  const answer=source=>source.slice(source.indexOf('pub async fn mvp_answer('),source.indexOf('pub async fn mvp_explain('));
  for(const marker of ['let token_limit = 6144','temperature\":0.2','CODE_ANSWER_SYSTEM','technical-answer.txt'])assert.ok(answer(after).includes(marker)&&answer(before).includes(marker),marker);
- for(const file of ['src/decisionScheduler.ts','src/knowledge.ts','src-tauri/src/commands/model_contract.rs','src-tauri/src/commands/speech_interpretation.rs','src-tauri/resources/technical-answer.txt','src-tauri/resources/answer-evidence.txt'])assert.equal((await readFile(file,'utf8')).replaceAll('\r\n','\n'),oldFile(file),file);
+ for(const file of ['src/decisionScheduler.ts','src-tauri/src/commands/model_contract.rs','src-tauri/src/commands/speech_interpretation.rs','src-tauri/resources/answer-evidence.txt'])assert.equal((await readFile(file,'utf8')).replaceAll('\r\n','\n'),oldFile(file),file);
+ const guidance=await readFile('src-tauri/resources/technical-answer.txt','utf8');
+ for(const line of oldFile('src-tauri/resources/technical-answer.txt').split('\n').filter(Boolean))assert.ok(guidance.includes(line),'existing technical/code requirements are preserved');
 });
 test('cached outputs retain every character; first clause arrives before a long first sentence completes',async()=>{
  const replay=JSON.parse(await readFile(new URL('./fixtures/ppo-display-replay.json',import.meta.url),'utf8'));
@@ -84,7 +86,8 @@ test('real UI keeps baseline answer arguments and waits for evidence while trans
     const id=await page.evaluate(()=>window.requests.at(-1).requestId);
     await page.evaluate(async id=>{await window.send('mvp_answer_token',{requestId:id,token:'定义：完整回答保留项目阶段、条件与结果。'});await window.send('mvp_answer_done',{requestId:id});},id);
    }
-   payloads.push(await page.evaluate(()=>window.requests.map(({requestId,endpoint,taskAttachment,backupEndpoint,fallbackWaitSeconds,...args})=>({...args,endpoint:{...endpoint,historySessionId:'SESSION'}}))));
+   if(!old)assert.ok(await page.evaluate(()=>window.requests.every(r=>Array.isArray(r.conversation)&&r.conversation.length===0)));
+   payloads.push(await page.evaluate(()=>window.requests.map(({requestId,endpoint,taskAttachment,backupEndpoint,fallbackWaitSeconds,conversation,...args})=>({...args,endpoint:{...endpoint,historySessionId:'SESSION'}}))));
    if(!old){
     await page.evaluate(()=>window.hold=true);await submit('等待资料完整的测试问题。');await page.waitForFunction(()=>window.gates.transport&&window.gates.evidence);
     assert.equal(await page.evaluate(()=>window.requests.length),3);

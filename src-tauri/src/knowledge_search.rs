@@ -1,5 +1,5 @@
 //! Local recall combines title/alias similarity and full answer BM25 using RRF.
-//! The API then judges task equivalence; lexical scores never authorize reuse.
+//! Broad recall is distinct from runtime evidence selection. Scores never authorize reuse.
 use crate::knowledge::Question;
 use std::collections::{HashMap, HashSet};
 /// A bounded glossary from local metadata, never generated answers or personal
@@ -152,6 +152,52 @@ pub fn ranked(query: &str, context: &str, questions: &[Question]) -> Vec<Questio
         .map(|i| questions[i].clone())
         .collect()
 }
+
+// A positive *current task* match is required for optional answer evidence.
+// Dialogue may rank candidates, but cannot turn an unrelated question into evidence.
+// Reuse the existing language-aware coverage score; a short source span prevents
+// scattered common words in a whole file from looking like one relevant passage.
+pub fn evidence_score(query:&str,text:&str)->f64 {
+    let query_terms:HashSet<_>=terms(query).into_iter().collect();
+    let identifiers=|s:&str|s.split(|c:char|!(c.is_ascii_alphanumeric()||('\u{0370}'..='\u{03ff}').contains(&c)||".-_".contains(c)))
+        .map(|s|s.trim_matches(|c|".-_".contains(c)).to_lowercase())
+        .filter(|s|s.chars().count()>=3&&s.chars().any(|c|c.is_ascii_alphabetic()||('\u{0370}'..='\u{03ff}').contains(&c))).collect::<HashSet<_>>();
+    let latin=identifiers(query);
+    let score=|span:&str|{
+        let span_terms:HashSet<_>=terms(span).into_iter().collect();
+        // A mixed-language identifier must match as a token, not incidental
+        // character bigrams inside an unrelated function/variable name.
+        if !latin.is_empty()&&latin.is_disjoint(&identifiers(span)){return 0.;}
+        let count=query_terms.intersection(&span_terms).count();
+        if count==0||query_terms.len()>2&&latin.is_empty()&&count<2{return 0.;}
+        if query_terms.len()>2&&latin.is_empty(){
+            // Two overlapping bigrams in a single three-character fragment
+            // (e.g. “的工作”) are one weak anchor, not two independent concepts.
+            let chars:Vec<_>=query.chars().collect();let mut index=0;let mut anchors=0;
+            while index+1<chars.len(){
+                let pair=chars[index..index+2].iter().collect::<String>();
+                if span_terms.contains(&pair){anchors+=1;index+=2;}else{index+=1;}
+            }
+            if anchors<2{return 0.;}
+        }
+        crate::interview_library::retrieval_score(query,span)
+    };
+    text.split('\n').filter(|s|!s.trim().is_empty()).map(|line|{
+        let chars:Vec<_>=line.chars().collect();
+        if chars.len()<=600 {return score(line);}
+        chars.chunks(600).map(|part|score(&part.iter().collect::<String>())).fold(0.,f64::max)
+    }).fold(0.,f64::max)
+}
+pub fn answer_candidates(query:&str,context:&str,questions:&[Question])->Vec<Question>{
+    let ranked=ranked(query,context,questions);
+    let scored:Vec<_>=ranked.into_iter().map(|q|{
+        let metadata=format!("{} {} {} {} {}",q.question,q.aliases.join(" "),q.tags.join(" "),q.project,q.task);
+        let score=evidence_score(query,&metadata).max(evidence_score(query,&q.answer));
+        (q,score)
+    }).collect();
+    let best=scored.iter().map(|(_,s)|*s).fold(0.,f64::max);
+    scored.into_iter().filter(|(_,s)|*s>=0.15&&*s>=best*0.40).take(12).map(|(q,_)|q).collect()
+}
 /// A stable directory prefix allows API prompt caches to reuse unchanged
 /// metadata across different questions. Actual cache hits remain provider data.
 pub fn match_payload(query: &str, context: &str, questions: &[Question]) -> String {
@@ -218,6 +264,29 @@ pub fn selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_evidence_can_be_empty_even_when_broad_recall_returns_a_small_bank(){
+        let qs=vec![Question{question:"机器人闭环评估".into(),answer:"测试成功率并运行仿真".into(),project:"算法项目".into(),..Default::default()},Question{question:"个人承担部分".into(),answer:"负责采集、标定和部署".into(),..Default::default()}];
+        assert_eq!(ranked("你现在有几个offer", "刚讨论了机器人仿真与部署",&qs).len(),2);
+        for text in ["你现在有几个offer","那边给你多少年薪","你从哪里得知我们的招聘信息","What is your notice period?"]{
+            assert!(answer_candidates(text,"机器人闭环评估，采集标定部署",&qs).is_empty(),"{text}");
+        }
+    }
+    #[test]
+    fn runtime_retains_answer_only_matches_and_multi_project_overviews(){
+        let qs=vec![Question{question:"个人职责".into(),answer:"负责采集、标定和机器人部署".into(),project:"A".into(),..Default::default()},Question{question:"实习期间的机器人项目".into(),answer:"执行移动机器人验证".into(),project:"B".into(),..Default::default()},Question{question:"实习期间的机械臂项目".into(),answer:"负责装配线运行支持".into(),project:"C".into(),..Default::default()}];
+        assert_eq!(answer_candidates("采集和标定由你独立完成吗","",&qs)[0].question,"个人职责");
+        let overview=answer_candidates("介绍一下你在实习期间做过的项目","",&qs);
+        assert!(overview.iter().any(|q|q.project=="B"));assert!(overview.iter().any(|q|q.project=="C"));
+    }
+    #[test]
+    fn whole_file_scattered_matches_do_not_create_a_relevant_span(){
+        assert!(evidence_score("压缩传输时延","压缩\n无关内容\n传输\n时延")<0.20);
+        assert!(evidence_score("PPO为什么限制更新幅度","PPO使用裁剪限制更新幅度，稳定策略优化。")>=0.20);
+        assert_eq!(evidence_score("你意向的工作想从事哪个方向","实际负责的工作是消融实验"),0.);
+        assert!(evidence_score("π0.5的架构是什么","π0.5是视觉语言动作模型。")>=0.20);
+        assert_eq!(evidence_score("offer情况是什么","offset=0; producer=worker;"),0.);
+    }
     #[test]
     fn recognition_vocabulary_is_bounded_and_contains_metadata_not_answer_facts(){
         let qs=vec![Question{question:"PPO 与 GAE 的关系".into(),answer:"private_secret_answer".into(),status:"confirmed".into(),..Default::default()},Question{question:"draft_only_term".into(),status:"draft".into(),..Default::default()}];

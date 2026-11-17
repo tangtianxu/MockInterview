@@ -17,6 +17,47 @@ fn save(path: &PathBuf, state: &Value) {
     std::fs::write(path, serde_json::to_vec_pretty(state).unwrap()).unwrap();
 }
 
+#[tokio::test]
+#[ignore="explicit local snapshot replay; never uses credentials or network"]
+async fn local_grounding_regression(){
+    let root=PathBuf::from(std::env::var("MOCK_LOCAL_LIBRARY").unwrap());
+    let report=PathBuf::from(std::env::var("MOCK_LOCAL_REPORT").unwrap());
+    assert!(!report.exists(),"Use a fresh local report");
+    let db=rusqlite::Connection::open_with_flags(std::env::var("MOCK_LOCAL_HISTORY").unwrap(),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut stmt=db.prepare("SELECT session_id,kind,text,data FROM history_entries WHERE session_id IN (SELECT id FROM history_sessions ORDER BY started_at DESC LIMIT 40) ORDER BY seq").unwrap();
+    let entries:Vec<(String,String,String,String)>=stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().map(Result::unwrap).collect();
+    let snapshot=crate::knowledge::snapshot(&root).unwrap();
+    let bank:Vec<_>=snapshot.questions.iter().filter(|q|q.status=="confirmed").cloned().collect();
+    let mut contexts=std::collections::HashMap::<String,String>::new();
+    let mut rows=Vec::new();let mut extraction_cases=0;
+    for (session,kind,text,raw) in entries{
+        let data:Value=serde_json::from_str(&raw).unwrap_or_default();
+        if kind=="decision"{
+            if let Some(input)=data.get("input").and_then(|v|serde_json::from_value::<task_harness::Input>(v.clone()).ok()){
+                contexts.insert(session.clone(),input.turns.iter().map(|t|format!("{}:{}",t.channel,t.text)).collect::<Vec<_>>().join("\n"));
+                if data["version"]==3&&!data["decision"]["audit"]["proposal"].is_null(){
+                    let audit=data["decision"]["audit"].clone();
+                    let replay=task_harness::run(&input,|name,_,_,_|{
+                        let saved=if name=="submit_task"{audit["proposal"].clone()}else{audit["verification"].clone()};
+                        async move {if saved.is_null(){Err("No saved model output; no new request made".into())}else{Ok(saved)}}
+                    }).await.unwrap();
+                    assert_eq!(replay.action,data["decision"]["action"].as_str().unwrap(),"saved extraction changed");
+                    assert_eq!(replay.question,data["decision"]["question"].as_str().unwrap(),"saved task changed");
+                    extraction_cases+=1;
+                }
+            }
+        }
+        if kind!="question"||data["coding"]==true{continue;}
+        let context=contexts.get(&session).cloned().unwrap_or_default();
+        let before=crate::knowledge_search::ranked(&text,&context,&bank).len();
+        let after=crate::knowledge::lookup_with_context(&root,&text,&context).unwrap();
+        assert!(after.questions.len()<=12);assert!(after.passages.len()<=5);
+        rows.push(json!({"session":session,"question":text,"beforeCandidates":before,"exact":after.exact.as_ref().map(|q|&q.id),"questions":after.questions.iter().map(|q|json!({"id":q.id,"question":q.question,"project":q.project})).collect::<Vec<_>>(),"passages":after.passages.iter().map(|p|json!({"id":p.source_id,"path":p.path,"locator":p.locator})).collect::<Vec<_>>()}));
+    }
+    assert!(extraction_cases>30);assert!(rows.len()>30);
+    save(&report,&json!({"networkRequests":0,"extractionCases":extraction_cases,"retrievalCases":rows.len(),"cases":rows}));
+}
+
 #[test]
 #[ignore = "local historical evidence audit; no network"]
 fn historical_evidence_diagnostics() {

@@ -25,6 +25,7 @@ pub mod task_context;
 pub mod knowledge_commands;
 pub(crate) mod practice_protocol;
 mod answer_stream;
+mod answer_context;
 mod answer_pump;
 mod model_failover;
 mod model_transport;

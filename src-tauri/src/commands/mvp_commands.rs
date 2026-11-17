@@ -242,7 +242,8 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     uncertain_terms: Vec<String>, answer_instructions: Option<String>, practice_reference: Option<bool>,
     practice_context: Option<PracticeContext>,knowledge_context:Option<super::knowledge_commands::AnswerContext>,
     code_question: Option<bool>,task_attachment:Option<super::task_context::TaskAttachment>,
-    backup_endpoint:Option<ModelEndpoint>,fallback_wait_seconds:Option<u64>) -> Result<(), String> {
+    backup_endpoint:Option<ModelEndpoint>,fallback_wait_seconds:Option<u64>,
+    conversation:Option<Vec<super::answer_context::SpeechTurn>>) -> Result<(), String> {
     if question.trim().is_empty() { return Err("没有可回答的问题".into()); }
     let coding = code_question.unwrap_or(false);
     if coding && question.chars().count() > 24_000 { return Err("题目文字超过24000字，请保留当前完整题目后重试".into()); }
@@ -272,6 +273,14 @@ pub async fn mvp_answer(app: AppHandle, endpoint: ModelEndpoint, request_id: Str
     let user = if previous.is_empty() { user } else {
         format!("之前的问题（仅用于理解当前追问的指代；新主体优先，不能据此编造个人经历或把旧题重新作答）：\n{previous}\n当前最新任务：\n{user}")
     };
+    let speech=super::answer_context::speech_context(conversation);
+    super::history_commands::record_audit(&app,endpoint.history_session_id.as_deref(),"retrieval","回答依据概要",serde_json::json!({
+        "requestId":request_id,"speechCharacters":speech.chars().count(),"speechHash":crate::knowledge::digest(speech.as_bytes()),
+        "questionIds":knowledge_context.as_ref().map(|c|c.questions.iter().map(|q|&q.id).collect::<Vec<_>>()).unwrap_or_default(),
+        "sourceIds":knowledge_context.as_ref().map(|c|c.passages.iter().map(|p|&p.source_id).collect::<Vec<_>>()).unwrap_or_default(),
+        "resumeOriginalCharacters":practice_context.as_ref().map(|c|c.resume_text.chars().count()).unwrap_or(0)
+    }));
+    let user=if speech.is_empty(){user}else{format!("{speech}\n当前最新任务：\n{user}")};
     let user = if let Some(context) = &practice_context {
         format!("{}\n{}", context.background(), user)
     } else { user };

@@ -456,6 +456,7 @@ pub fn run() {
             mvp_commands::mvp_prepare_model_transport,
             commands::screen_commands::capture_code_screen,
             knowledge_commands::knowledge_snapshot,
+            knowledge_commands::knowledge_set_answer_source,
             knowledge_commands::knowledge_record_read,
             knowledge_commands::knowledge_save_inbox,
             knowledge_commands::knowledge_import_questions,

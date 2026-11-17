@@ -139,6 +139,9 @@ test('dual and microphone-only transcription route questions and preserve contex
  await speech('Them','c','为什么选择它',300);await page.locator('.answer-text').filter({hasText:'为什么选择 GAE'}).waitFor();
  const follow=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
  assert.ok(follow.turns.some(t=>!t.current&&t.channel==='microphone'&&t.text==='我采用的是 GAE'));assert.ok(follow.turns.some(t=>!t.current&&t.text.includes('介绍 PPO')));
+ const answerArgs=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').at(-1).args);
+ assert.ok(answerArgs.conversation.some(t=>t.channel==='microphone'&&t.text==='我采用的是 GAE'));
+ assert.ok(answerArgs.conversation.some(t=>t.channel==='system'&&t.text==='为什么选择它'));
  // Partial candidate replies also reach the next question without generating their own task.
  await speech('User','d','这里使用了优势归一化',400,false);
  await speech('Them','e','如何实现这个步骤',500);await page.locator('.answer-text').filter({hasText:'如何实现这个步骤'}).waitFor();
@@ -213,6 +216,7 @@ test('dual and microphone-only transcription route questions and preserve contex
   await page.locator('.answer-text').filter({hasText:'什么时候使用'}).waitFor();
   const follow=await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_decide').at(-1).args.input);
   assert.ok(follow.turns.some(t=>!t.current&&t.text.includes('PPO 的原理')));assert.equal(follow.mode,'offline');
+  assert.ok((await page.evaluate(()=>window.calls.filter(x=>x.command==='mvp_answer').at(-1).args.conversation)).every(t=>t.channel==='mixed'));
   assert.equal(await page.getByRole('button',{name:/线下面试/}).isDisabled(),true);
   await page.getByRole('button',{name:'结束练习',exact:true}).click();
   await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'音频设备'}).click();
